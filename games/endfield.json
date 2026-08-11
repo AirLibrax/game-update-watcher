@@ -4,6 +4,12 @@
   "theme_color": "#2F6F4F",
   "format": "version_based",
   "adapter": "hg_ssr",
+  "extra_sources": [
+    {
+      "adapter": "bili_dynamic",
+      "params": {"uid": "1265652806"}
+    }
+  ],
   "adapter_params": {
     "news_url": "https://endfield.hypergryph.com/news",
     "timeout": 15

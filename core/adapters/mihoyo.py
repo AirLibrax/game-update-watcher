@@ -78,10 +78,3 @@ class MihoyoJsonAdapter(BaseAdapter):
                     claims.append(FieldClaim(field="content", value=content, source=self.SOURCE_ID, weight=self.WEIGHT, url=url))
                 items.append({"raw_title": title, "claims": claims, "url": url, "raw": item})
         return items
-
-
-class HsrAdapter(MihoyoJsonAdapter):
-    SOURCE_ID = "mihoyo_hsr"
-
-class ZzzAdapter(MihoyoJsonAdapter):
-    SOURCE_ID = "mihoyo_zzz"

@@ -4,6 +4,12 @@
   "theme_color": "#E0483E",
   "format": "version_based",
   "adapter": "mihoyo_json",
+  "extra_sources": [
+    {
+      "adapter": "bili_dynamic",
+      "params": {"uid": "1636034895"}
+    }
+  ],
   "adapter_params": {
     "api_base": "https://announcement-api.mihoyo.com",
     "game": "nap",

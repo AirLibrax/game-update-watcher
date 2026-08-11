@@ -4,6 +4,12 @@
   "theme_color": "#6A5AE0",
   "format": "version_based",
   "adapter": "mihoyo_json",
+  "extra_sources": [
+    {
+      "adapter": "bili_dynamic",
+      "params": {"uid": "1340190821"}
+    }
+  ],
   "adapter_params": {
     "api_base": "https://hkrpg-api-static.mihoyo.com",
     "game": "hkrpg",

@@ -140,6 +140,8 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
     has_preview = bool(update.field_value("preview_time"))
     up_chars = _up_chars_str(update)
     half_chars = _half_chars_str(update)
+    # 合并角色行：版本新角色 + 下半池角色（都显示，逗号分隔）
+    all_chars = "、".join(x for x in (up_chars, half_chars) if x)
 
     stage = _stage(start, today, cycle)
     slots: list[TimelineSlot] = []
@@ -181,12 +183,12 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
             estimated=half_est,
         ))
     elif stage <= 4:
-        # 2-4 周：下半池 + 前瞻预估
+        # 2-4 周：下半池 + 前瞻预估（角色合并显示：版本新角色+下半池）
         slots.append(TimelineSlot(
             "本版本·下半池",
             "下半池",
             half_date,
-            half_chars,
+            all_chars,
             estimated=half_est,
         ))
         slots.append(TimelineSlot(
@@ -196,11 +198,12 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
             estimated=preview_est,
         ))
     elif stage == 5:
-        # 第 5 周：前瞻 + 下版本时间
+        # 第 5 周：前瞻 + 下版本时间（本版本角色仍显示在栏位A）
         slots.append(TimelineSlot(
             "下版本·前瞻",
             "前瞻",
             preview_text,
+            all_chars,
             estimated=preview_est,
         ))
         slots.append(TimelineSlot(
@@ -210,11 +213,12 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
             estimated=not next_known,
         ))
     else:
-        # 第 6 周：下版本时间 + 下版本上半池
+        # 第 6 周：下版本时间 + 下版本上半池（本版本角色仍显示）
         slots.append(TimelineSlot(
             "下版本·更新时间",
             f"v{next_num}",
             f"{fmt_date(next_start)}" if next_known else f"约 {fmt_date(next_start)}",
+            all_chars,
             estimated=not next_known,
         ))
         slots.append(TimelineSlot(

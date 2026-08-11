@@ -27,11 +27,11 @@ RE_MAINT = re.compile(
 RE_PREVIEW = re.compile(
     rf"(前瞻|特别通讯|直播|前瞻通讯)[^。\n]{{0,40}}({DATE_CN}|{DATE_MD})\s*({TIME_HM})?"
 )
-# 新角色：优先从「xxx」角色活动唤取/限时寻访模式提取（米哈游/库洛公告正文常见）
-#   例：5星共鸣者「秧秧・玄翎」（湮灭 | 迅刀） / 5星「姬子•启行（智识•火）」
-#   负向前瞻排除 光锥/武器/音擎/遗器，防止 "5星光锥「当一颗星照亮夜空」" 这类把装备名当角色
+# 新角色：优先从「xxx」角色活动唤取/限时寻访模式提取（米哈游/库洛/鹰角公告正文常见）
+#   例：5星共鸣者「秧秧・玄翎」（湮灭 | 迅刀） / 5星「姬子•启行（智识•火）」/ 6星干员【诀】
+#   负向前瞻排除 光锥/武器/音擎/遗器；捕获组排除 冒号/斜杠 防止 "包括：诀/卡缪" 整串被当角色
 RE_CHAR_BANNER = re.compile(
-    r"(?:★{1,6}|\d\s*星|五星|四星|S级|A级)\s*(?![^「』]{0,6}?(?:光锥|武器|音擎|遗器))\s*(?:共鸣者|角色|干员|代理人|特勤|英雄|邦布)?\s*[「『\[]?\s*([^」』\]「『\s,，、()（）【】\n]{1,12})\s*[」』\]]?"
+    r"(?:★{1,6}|\d\s*星|五星|四星|S级|A级)\s*(?![^「』【】]{0,6}?(?:光锥|武器|音擎|遗器))\s*(?:共鸣者|角色|干员|代理人|特勤|英雄|邦布)?\s*[「『\[【]?\s*([^」』\]「『【】\s,，、:：/（）()\n]{1,12})\s*[」』\]】]?"
 )
 # 兜底：正文里的「xxx」词组（排除明显不是角色的）
 RE_CHARS = re.compile(r"[「『]([^」』]{1,12})[」』]")
@@ -42,7 +42,7 @@ RE_HALF_CHAR = re.compile(
 )
 BAD_CHAR_WORDS = (
     "维护", "更新", "补偿", "时间", "活动", "版本", "前瞻", "直播",
-    "武器", "皮肤", "时装", "套装", "奖励", "商店", "任务", "概率",
+    "皮肤", "时装", "套装", "奖励", "商店", "任务", "概率",
     "说明", "公告", "开启", "上线", "兑换", "签到", "礼包", "联动",
     "优化", "修复", "问题", "调整", "追加", "亲爱的", "漂泊者", "玩家",
     "博士", "绳匠", "开拓者", "内容", "介绍", "敬请", "关注",
@@ -91,17 +91,39 @@ def _strip_html(s: str) -> str:
     return s
 
 
+def _extract_section(text: str, starts: tuple[str, ...], ends: tuple[str, ...]) -> str:
+    """取 start 关键词到第一个 end 关键词之间的文本。找不到则返回全文。"""
+    if not starts:
+        return text
+    start_pos = -1
+    start_len = 0
+    for s in starts:
+        pos = text.find(s)
+        if pos != -1 and (start_pos == -1 or pos < start_pos):
+            start_pos = pos
+            start_len = len(s)
+    if start_pos == -1:
+        return text
+    end_pos = len(text)
+    for e in ends:
+        pos = text.find(e, start_pos + start_len)
+        if pos != -1 and pos < end_pos:
+            end_pos = pos
+    return text[start_pos:end_pos]
+
+
 def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
     """把 adapter 原始条目按游戏配置提取为目标字段声明。"""
     claims: list[FieldClaim] = item["claims"]
     title = item.get("raw_title", "")
 
     # 已知确定时间覆盖（games/*.json 的 known_dates，官方已官宣）
+    # weight 用 1.5：保证 aggregate 必然选 known 值，而非依赖插入顺序
     known = cfg.known_dates
     known_claims: list[FieldClaim] = []
     for fld, val in known.items():
         if val:
-            known_claims.append(FieldClaim(fld, val, "known", 1.0, ""))
+            known_claims.append(FieldClaim(fld, val, "known", 1.5, ""))
 
     # 正文合并（多段 content 拼接），统一剥 HTML 再匹配
     contents = [c.value for c in claims if c.field == "content"]
@@ -223,11 +245,40 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
             if m5:
                 char_names.extend(_extract_ark_seg(m5.group(1)))
     else:
+        # 版本制游戏：锚定角色章节提取，避免武器/装备名混入
         allow_bracket_fallback = cfg.adapter == "kuro_json"
-        for m in RE_CHAR_BANNER.finditer(content):
-            name = m.group(1).strip()
-            if name and not any(w in name for w in BAD_CHAR_WORDS) and not re.search(r"[\d*×%]|：|:", name):
-                char_names.append(name)
+        if cfg.adapter == "mihoyo_json":
+            # 米哈游：2、全新角色 → 3、全新光锥（绝区零是 全新代理人 → 全新音擎）
+            sec = _extract_section(
+                content,
+                ("全新角色", "新角色", "全新代理人", "新代理人"),
+                ("全新光锥", "全新武器", "全新音擎", "全新邦布", "全新装扮", "全新场景", "全新活动", "全新剧情"),
+            )
+            for m in RE_CHAR_BANNER.finditer(sec):
+                name = m.group(1).strip()
+                if name and not any(w in name for w in BAD_CHAR_WORDS) and not re.search(r"[\d*×%]|：|:", name):
+                    char_names.append(name)
+        elif cfg.adapter == "hg_ssr":
+            # 终末地：■ 全新干员 → ■ 全新武器（干员行：6星干员【诀】【梨诺】）
+            sec = _extract_section(content, ("全新干员", "新增干员"), ("全新武器", "全新敌人", "全新区域", "全新寻访", "全新活动", "全新剧情", "全新场景"))
+            for m in RE_CHAR_BANNER.finditer(sec):
+                name = m.group(1).strip()
+                if name and not any(w in name for w in BAD_CHAR_WORDS) and not re.search(r"[\d*×%]|：|:", name):
+                    char_names.append(name)
+            # 补充："6星干员【诀】【梨诺】" 并列的【】名字（第二个起无星级前缀）
+            for m in re.finditer(r"【([^】]{1,8})】", sec):
+                name = m.group(1).strip()
+                if not name or name in char_names:
+                    continue
+                if any(w in name for w in BAD_CHAR_WORDS) or re.search(r"[\d*×%]|：|:", name):
+                    continue
+                if 2 <= len(name) <= 8:
+                    char_names.append(name)
+        else:
+            for m in RE_CHAR_BANNER.finditer(content):
+                name = m.group(1).strip()
+                if name and not any(w in name for w in BAD_CHAR_WORDS) and not re.search(r"[\d*×%]|：|:", name):
+                    char_names.append(name)
         if allow_bracket_fallback and not char_names:
             for m in RE_CHARS.finditer(content):
                 name = m.group(1).strip()
@@ -262,6 +313,24 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
         for c in claims:
             if c.field == "start_time" and c.value:
                 out.append(FieldClaim("half_start", c.value, "parse", 1.0, source_url))
+                break
+    # 5c. 通用卡池时间提取：正文里"跃迁时间为 2026/07/15 ... - 2026/08/25" 模式
+    #     第二组"跃迁时间为"通常是下半池（如崩铁：刻律德菈等返场，跃迁时间为 2026/08/05 - 08/25）
+    #     同时兼容终末地"特许寻访 · 开放时间"格式
+    if not any(c.field == "half_start" for c in out):
+        # 米哈游格式：第二组跃迁时间
+        jump_times = list(re.finditer(r"跃迁时间为\s*(\d{4})/(\d{2})/(\d{2})", content))
+        if len(jump_times) >= 2:
+            m = jump_times[1]
+            out.append(FieldClaim("half_start", f"{m.group(1)}-{m.group(2)}-{m.group(3)}", "parse", 1.0, source_url))
+        else:
+            # 终末地格式：特许寻访开放时间（第一个具体日期即下半池开始）
+            for m in re.finditer(r"特许寻访[^。]{0,120}?开放时间[：:]\s*\S*?(\d{4})/(\d{2})/(\d{2})", content):
+                out.append(FieldClaim(
+                    "half_start",
+                    f"{m.group(1)}-{m.group(2)}-{m.group(3)}",
+                    "parse", 1.0, source_url,
+                ))
                 break
 
     # 6. 链接

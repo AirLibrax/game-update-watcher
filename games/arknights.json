@@ -4,6 +4,12 @@
   "theme_color": "#333C44",
   "format": "activity_based",
   "adapter": "hg_json",
+  "extra_sources": [
+    {
+      "adapter": "bili_dynamic",
+      "params": {"uid": "161775300"}
+    }
+  ],
   "adapter_params": {
     "api_base": "https://ak-webview.hypergryph.com",
     "target": "IOS",

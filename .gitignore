@@ -13,6 +13,10 @@ selftestout/
 python
 3.10)
 
+# 临时调试脚本
+bili_test.py
+hg_ssr_test.py
+
 # 本地私有配置（如有）
 *.local.toml
 .env

@@ -59,7 +59,8 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont:
 
 
 def _fit_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int) -> str:
-    """超宽文本截断加省略号。"""
+    """超宽文本截断加省略号（先合并换行为空格）。"""
+    text = " ".join(text.split())  # 折叠所有换行/空白
     if draw.textlength(text, font=font) <= max_w:
         return text
     while text and draw.textlength(text + "…", font=font) > max_w:

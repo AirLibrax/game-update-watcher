@@ -14,9 +14,7 @@ from typing import Any
 
 from core.adapters import create_adapter
 from core.models import FieldVerdict, GameConfig, GameUpdate
-from core.renderer import render_card
 from core.store import PublishStore
-from core.timeline import build_timeline
 from core.validator import aggregate, extract_fields
 
 
@@ -51,25 +49,65 @@ class UpdatePipeline:
         return True
 
     async def collect_game(self, cfg: GameConfig, timeout: float = 15.0) -> list[dict[str, Any]]:
-        """采集 + 筛选出候选条目（命中标题规则的）。"""
+        """采集主源 + 额外认证源，合并所有条目（命中标题规则的）。
+
+        额外源（如 B站动态）的条目会作为同字段的第二声明，
+        aggregate 据此做字段级交叉认证（多源一致 → 置信度提升）。
+        """
+        items: list[dict[str, Any]] = []
+        # 主源
         adapter = create_adapter(cfg.adapter, {**cfg.adapter_params, "timeout": timeout}, self.logger)
-        items = await adapter.collect()
+        try:
+            items.extend(await adapter.collect())
+        except Exception as e:
+            self._log(f"[{cfg.display}] 主源 {cfg.adapter} 采集失败: {e}")
+        # 额外认证源
+        for src in cfg.extra_sources:
+            try:
+                extra = create_adapter(src["adapter"], {**src.get("params", {}), "timeout": timeout}, self.logger)
+                items.extend(await extra.collect())
+            except Exception as e:
+                self._log(f"[{cfg.display}] 认证源 {src.get('adapter')} 采集失败: {e}")
+
         cands = [it for it in items if self._match_rules(it.get("raw_title", ""), cfg)]
-        self._log(f"[{cfg.display}] 采集 {len(items)} 条，命中规则 {len(cands)} 条")
+        self._log(f"[{cfg.display}] 采集 {len(items)} 条（主源+认证源），命中规则 {len(cands)} 条")
         return cands
 
     async def build_updates(self, cfg: GameConfig, candidates: list[dict[str, Any]],
                             publish_threshold: float) -> list[GameUpdate]:
-        """候选条目 → 字段提取 → 交叉认证 → GameUpdate 列表。"""
-        updates: list[GameUpdate] = []
-        half_starts: list[str] = []  # 卡池公告提供的官方下半池时间
+        """候选条目 → 字段提取 → 交叉认证 → GameUpdate 列表。
+
+        多源逻辑：
+        - 主源条目（版本更新说明等）正常生成 GameUpdate
+        - 认证源条目（如 B站动态）不生成独立条目，而是按版本号匹配主条目后，
+          把其字段声明注入主条目的 claim 列表重新聚合，实现字段级交叉认证
+        """
+        # 第一遍：主源条目 → 生成 GameUpdate；认证源条目 → 暂存等待匹配
+        main_items: list[dict[str, Any]] = []      # 主源原始条目
+        auth_items: list[dict[str, Any]] = []      # 认证源原始条目
+        half_starts: list[str] = []                # 卡池公告提供的官方下半池时间
+
         for item in candidates:
             claims = extract_fields(item, cfg)
             # 卡池公告（无版本名，只有 half_start）：不进卡片列表，仅收集时间
+            # 注意：终末地的版本更新说明也含 half_start，但它是主条目，不能跳过
+            has_name = any(c.field == "version_name" and c.value for c in claims)
             hs = [c.value for c in claims if c.field == "half_start" and c.value]
-            if hs:
+            if hs and not has_name:
                 half_starts.extend(hs)
                 continue
+            # 判断是否为认证源：看原始 adapter 的 claims（提取后会丢失 source 标记）
+            raw_sources = {c.source for c in item.get("claims", [])}
+            if any("bili" in s for s in raw_sources):
+                auth_items.append(item)
+            else:
+                main_items.append(item)
+
+        # 主源 → GameUpdate
+        updates: list[GameUpdate] = []
+        main_claims_map: dict[int, list] = {}  # updates index → 其主源条目提取的 claims
+        for idx, item in enumerate(main_items):
+            claims = extract_fields(item, cfg)
             verdicts = aggregate(claims, publish_threshold)
             if "version_name" not in verdicts:
                 continue
@@ -85,7 +123,43 @@ class UpdatePipeline:
                 raw_title=item.get("raw_title", ""),
                 collected_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
             )
+            main_claims_map[len(updates)] = claims
             updates.append(update)
+
+        # 认证源匹配：优先按活动名匹配，没有活动名再按版本号
+        for auth in auth_items:
+            auth_claims = extract_fields(auth, cfg)
+            auth_name, auth_ver = self._auth_match_key(auth, cfg, auth_claims)
+            if not auth_name and not auth_ver:
+                continue
+            target_idx = None
+            # 优先活动名（版本名）匹配
+            if auth_name:
+                for i, up in enumerate(updates):
+                    if up.version_name and up.version_name == auth_name:
+                        target_idx = i
+                        break
+            # 版本号兜底
+            if target_idx is None and auth_ver:
+                for i, up in enumerate(updates):
+                    if up.version_num and up.version_num == auth_ver:
+                        target_idx = i
+                        break
+            if target_idx is None:
+                continue
+            # 认证源贡献时间/角色类字段；版本标识（version/version_name）以主源为准，避免乱文覆盖
+            auth_claims = [c for c in auth_claims if c.field not in ("version", "version_name")]
+            if not auth_claims:
+                continue
+            # 主源 claims + 认证源 claims 一起聚合 → 同字段多源加权
+            base_claims = main_claims_map.get(target_idx, [])
+            merged_claims = base_claims + auth_claims
+            verdicts = aggregate(merged_claims, publish_threshold)
+            updates[target_idx].fields = verdicts
+            self._log(
+                f"[{cfg.display}] 认证源匹配 {'活动「' + auth_name + '」' if auth_name else 'v' + auth_ver}，"
+                f"合并 {len(auth_claims)} 条字段声明"
+            )
 
         # 把卡池公告的官方下半池时间注入主版本条目
         if half_starts and updates:
@@ -151,13 +225,24 @@ class UpdatePipeline:
             updates = [main]
         return updates
 
-    def render(self, update: GameUpdate, cfg: GameConfig, runtime_dir: Path,
-               watermark: str = "") -> Path:
-        """出图，返回 PNG 路径。"""
-        timeline = build_timeline(update, cfg)
-        safe_name = re.sub(r"[^\w\u4e00-\u9fff]", "_", update.display_title)[:40]
-        out = runtime_dir / f"{cfg.key}_{safe_name}.png"
-        return render_card(update, cfg, timeline, out, watermark=watermark)
+    def _auth_match_key(self, item: dict, cfg: GameConfig, auth_claims: list | None = None) -> tuple[str, str]:
+        """从认证源条目提取匹配键：(活动名, 版本号)。
+
+        活动名优先（B站动态标题如「向渊行」版本更新说明 可提取出 '向渊行'），
+        版本号兜底（如 "4.4版本活动跃迁（其二）" 提取 '4.4'）。
+        活动名取 extract_fields 提取的 version_name（主源与认证源同规则，措辞一致才能匹配）。
+        """
+        claims = auth_claims if auth_claims is not None else extract_fields(item, cfg)
+        name = ""
+        for c in claims:
+            if c.field == "version_name" and c.value:
+                name = c.value.strip()
+                break
+        ver = ""
+        m = re.search(r"(\d+\.\d+)\s*版本", item.get("raw_title", ""))
+        if m:
+            ver = m.group(1)
+        return name, ver
 
     def encode_image(self, png_path: Path) -> str:
         """PNG → base64（send.image 需要）。"""

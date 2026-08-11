@@ -14,15 +14,94 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
 from pathlib import Path
+
+# 确保插件目录及其父目录在 sys.path 上：MaiBot Runner 加载 plugin.py 时
+# 工作目录不一定是插件目录，本地模块 core.* 依赖此路径才能被导入。
+_PLUGIN_DIR = Path(__file__).resolve().parent
+_PLUGIN_PARENT = _PLUGIN_DIR.parent
+for _p in (_PLUGIN_DIR, _PLUGIN_PARENT):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from maibot_sdk import Command, MaiBotPlugin, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
-from core.pipeline import UpdatePipeline
-from core.renderer import render_summary
-from core.store import PublishStore
-from core.timeline import build_timeline
+try:
+    from core.pipeline import UpdatePipeline
+    from core.renderer import render_summary
+    from core.store import PublishStore
+    from core.timeline import build_timeline
+except ImportError:
+    # 按包方式加载时的相对导入回退
+    from .core.pipeline import UpdatePipeline
+    from .core.renderer import render_summary
+    from .core.store import PublishStore
+    from .core.timeline import build_timeline
+
+
+def _load_config_file(plugin_dir: Path) -> dict:
+    """读取插件目录 config.toml（若存在）。
+
+    不依赖 MaiBot 的 config 能力（避免 E_CAPABILITY_DENIED），
+    直接读文件：优先 tomllib（Py3.11+），回退 configparser（Py3.10）。
+    """
+    cfg_path = plugin_dir / "config.toml"
+    if not cfg_path.exists():
+        return {}
+    try:
+        import tomllib
+
+        with open(cfg_path, "rb") as f:
+            return tomllib.load(f)
+    except ImportError:
+        pass
+    except Exception:
+        return {}
+    # Python 3.10 回退：configparser 简易解析（值都是字符串，调用方有转换）
+    import configparser
+
+    cp = configparser.ConfigParser()
+    try:
+        cp.read(cfg_path, encoding="utf-8")
+    except Exception:
+        return {}
+    result: dict = {}
+    for sec in cp.sections():
+        result[sec] = {k: v for k, v in cp.items(sec)}
+    return result
+
+
+def _coerce_config(cfg: dict) -> dict:
+    """把 configparser 读出的字符串值转成正确类型（tomllib 分支无需此步）。"""
+    bool_keys = ("enabled", "scheduled_enabled", "debug", "show_pending_fields")
+    int_keys = ("poll_interval_minutes", "publish_threshold", "http_timeout_seconds")
+    for section in cfg.values():
+        if not isinstance(section, dict):
+            continue
+        for k in list(section):
+            v = section[k]
+            if not isinstance(v, str):
+                continue
+            if k in bool_keys:
+                section[k] = v.strip().lower() in ("true", "1", "yes")
+            elif k in int_keys:
+                try:
+                    section[k] = int(v)
+                except ValueError:
+                    try:
+                        section[k] = float(v)
+                    except ValueError:
+                        pass
+            elif v.strip().startswith("["):
+                # 简易列表解析：["a", "b"]
+                try:
+                    section[k] = json.loads(v)
+                except Exception:
+                    pass
+    return cfg
 
 
 class GameUpdatePlugin(MaiBotPlugin):
@@ -46,8 +125,9 @@ class GameUpdatePlugin(MaiBotPlugin):
         data_dir = self.ctx.paths.data_dir
         runtime_dir = self.ctx.paths.runtime_dir
 
-        # 读取插件配置（config.toml → SDK config.get_all）
-        self._cfg = await self.ctx.config.get_all() or {}
+        # 读取插件配置：直接读插件目录 config.toml，不依赖 MaiBot config 能力
+        # _coerce_config 处理 configparser 回退分支的字符串类型
+        self._cfg = _coerce_config(_load_config_file(Path(__file__).resolve().parent))
         # 兼容两种结构：{"plugin": {...}} 或平铺
         self._cfg_plugin = self._cfg.get("plugin", {}) if isinstance(self._cfg.get("plugin"), dict) else self._cfg
 
@@ -78,11 +158,11 @@ class GameUpdatePlugin(MaiBotPlugin):
             self._store.close()
 
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
-        # 配置热更新时刷新本地副本，下一次调用即生效
-        if scope == "self" and isinstance(config_data, dict):
-            self._cfg = config_data
-            self._cfg_plugin = config_data.get("plugin", {}) if isinstance(config_data.get("plugin"), dict) else config_data
-            self.ctx.logger.info("game-update-watcher 配置已热更新")
+        # 配置热更新时重新读取文件（与 on_load 同源），保证两套入口读到同一份配置
+        del scope, config_data, version
+        self._cfg = _coerce_config(_load_config_file(Path(__file__).resolve().parent))
+        self._cfg_plugin = self._cfg.get("plugin", {}) if isinstance(self._cfg.get("plugin"), dict) else self._cfg
+        self.ctx.logger.info("game-update-watcher 配置已热更新")
 
     # ---------- 触发入口 ----------
 
@@ -119,38 +199,44 @@ class GameUpdatePlugin(MaiBotPlugin):
 
     # ---------- 核心：采集 + 渲染 + 发送到指定聊天流 ----------
 
-    async def _build_and_send(self, stream_id: str) -> tuple[bool, str]:
-        """采集所有游戏 → 渲染汇总图 → 发送到指定聊天流。返回 (是否成功, 说明)。"""
-        cfg_plugin = self._cfg_plugin
-        threshold = float(cfg_plugin.get("publish_threshold", 0.8))
-        timeout = float(cfg_plugin.get("http_timeout_seconds", 15))
-        watermark = cfg_plugin.get("debug", False) and "DEBUG" or ""
+    async def _collect_entries(self, only_new: bool, threshold: float, timeout: float) -> list[tuple]:
+        """采集所有游戏，返回 [(update, cfg, timeline)]。
 
-        entries: list[tuple] = []  # (update, cfg, timeline)
-        errors: list[str] = []
+        only_new=True 时只保留未发布过的条目（定时推送用）；
+        False 时返回全部（Tool/指令按需用）。
+        """
+        entries: list[tuple] = []
         for key, gc in self._games.items():
             try:
                 candidates = await self._pipeline.collect_game(gc, timeout)
                 updates = await self._pipeline.build_updates(gc, candidates, threshold)
                 for up in updates:
+                    if only_new and not self._pipeline.is_new(up):
+                        continue
                     tl = build_timeline(up, gc)
                     entries.append((up, gc, tl))
             except Exception as e:
                 self.ctx.logger.exception("[%s] 处理失败: %s", gc.display, e)
-                errors.append(f"{gc.display}: {e}")
+        return entries
+
+    async def _build_and_send(self, stream_id: str) -> tuple[bool, str]:
+        """采集所有游戏 → 渲染汇总图 → 发送到指定聊天流。返回 (是否成功, 说明)。"""
+        cfg_plugin = self._cfg_plugin
+        threshold = float(cfg_plugin.get("publish_threshold", 0.8))
+        timeout = float(cfg_plugin.get("http_timeout_seconds", 15))
+        watermark = "DEBUG" if cfg_plugin.get("debug", False) else ""
+
+        entries = await self._collect_entries(only_new=False, threshold=threshold, timeout=timeout)
 
         if not entries:
-            return False, "采集失败或没有可用数据" + (f"（{len(errors)} 个游戏出错）" if errors else "")
+            return False, "采集失败或没有可用数据"
 
         try:
             png = render_summary(entries, self._runtime_dir / "summary.png", watermark)
             b64 = self._pipeline.encode_image(png)
             ok = await self.ctx.send.image(image_data=b64, stream_id=stream_id)
             if ok:
-                msg = f"已生成游戏更新速报（{len(entries)} 条）"
-                if errors:
-                    msg += f"，{len(errors)} 个游戏采集失败"
-                return True, msg
+                return True, f"已生成游戏更新速报（{len(entries)} 条）"
             return False, "图片发送失败"
         except Exception as e:
             self.ctx.logger.exception("汇总图渲染/发送失败: %s", e)
@@ -176,22 +262,10 @@ class GameUpdatePlugin(MaiBotPlugin):
         threshold = float(cfg_plugin.get("publish_threshold", 0.8))
         timeout = float(cfg_plugin.get("http_timeout_seconds", 15))
         default_groups: list[str] = cfg_plugin.get("default_groups", [])
-        watermark = cfg_plugin.get("debug", False) and "DEBUG" or ""
+        watermark = "DEBUG" if cfg_plugin.get("debug", False) else ""
 
         # 只发新条目（去重）
-        new_entries: list[tuple] = []
-        for key, gc in self._games.items():
-            try:
-                candidates = await self._pipeline.collect_game(gc, timeout)
-                updates = await self._pipeline.build_updates(gc, candidates, threshold)
-                for up in updates:
-                    if not self._pipeline.is_new(up):
-                        continue
-                    tl = build_timeline(up, gc)
-                    new_entries.append((up, gc, tl))
-            except Exception as e:
-                self.ctx.logger.exception("[%s] 处理失败: %s", gc.display, e)
-
+        new_entries = await self._collect_entries(only_new=True, threshold=threshold, timeout=timeout)
         if not new_entries:
             return
 

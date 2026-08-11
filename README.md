@@ -1,125 +1,202 @@
 # game-update-watcher
 
-MaiBot 插件：定时采集多款游戏版本更新信息，交叉认证后渲染成信息卡图片，推送到指定 QQ 群。
+MaiBot 插件：采集多款游戏（鸣潮/明日方舟/明日方舟终末地/绝区零/崩坏：星穹铁道）的版本更新公告，做字段级交叉认证后，按 6 周版本节奏生成汇总长图，发送到 QQ 群。
 
-支持游戏（开箱即用）：鸣潮、明日方舟、明日方舟终末地、绝区零、崩坏：星穹铁道
+## 功能特性
+
+- **多游戏聚合**：5 款游戏开箱即用，新增游戏只需写一个 JSON 配置（见 `GUIDE.md`）
+- **多源交叉认证**：主源（官方公告接口）+ 认证源（B站官方账号动态）对同一字段做加权校验
+- **6 周版本节奏**：按版本更新日推算当前处于哪个阶段，两栏位展示上下半池/前瞻/下版本时间
+- **确定信息优先**：官方已公布的时间（含人工配置的 `known_dates`）直接显示，推算值标「（预估）」
+- **三种触发方式**：LLM Tool 自动调用（默认）、`/游戏速报` 指令、可选定时推送
+- **格式模板驱动**：布局由 `formats/*.json` 控制，加新布局类型不改代码
+
+---
 
 ## 触发方式
 
-插件默认通过 **Tool「游戏更新速报」** 触发：麦麦的 LLM 在对话中判断用户需要游戏更新/卡池/前瞻信息时，自动调用工具生成汇总图发送到当前聊天流。
+| 方式 | 说明 | 配置 |
+|---|---|---|
+| **Tool「游戏更新速报」**（默认） | 麦麦的 LLM 在对话中判断用户需要游戏更新/卡池/前瞻信息时，自动调用工具，生成汇总图发到当前聊天流 | 无需配置 |
+| **指令 `/游戏速报`** | 群里手动触发，发到当前聊天流 | 无需配置 |
+| **定时推送**（可选） | 按间隔自动推送新版本信息到 `default_groups` | `scheduled_enabled = true` |
 
-手动触发：群里发送 `/游戏速报`。
+Tool/指令触发不需要配置群号，发到"当前对话所在的群"；定时推送需要 `default_groups`。
 
-可选定时推送：`config.toml` 里 `scheduled_enabled = true` 并填 `default_groups`，按 `poll_interval_minutes` 间隔自动推送新版本信息。
+---
 
 ## 工作原理
 
 ```
-┌─────────┐   ┌──────────┐   ┌──────────┐   ┌────────┐   ┌─────────┐
-│ Adapter │ → │ 字段提取  │ → │ 交叉认证  │ → │ 出图    │ → │ 多群发送 │
-│ (采集)  │   │ (解析)    │   │ (置信度)  │   │ Pillow │   │ send.image│
-└─────────┘   └──────────┘   └──────────┘   └────────┘   └─────────┘
+┌──────────┐   ┌──────────┐   ┌──────────┐   ┌────────┐   ┌─────────┐
+│ 采集层    │ → │ 解析层    │ → │ 认证层    │ → │ 节奏层  │ → │ 渲染发送 │
+│ Adapter  │   │ 字段提取  │   │ 交叉认证  │   │ timeline│   │ Pillow  │
+└──────────┘   └──────────┘   └──────────┘   └────────┘   └─────────┘
+   多个源          正则/规则      多源加权      6周阶段      汇总长图
 ```
 
-- **采集**：4 个 adapter（米哈游 JSON / 鹰角 JSON / 鹰角 SSR / 库洛 JSON），按「数据形态」复用，不按游戏拆分
-- **解析**：每游戏一份 `games/*.json`，配置版本号正则、标题过滤规则
-- **认证**：字段级置信度 = 最高源权重 + 一致源加分，低于阈值标「待确认」或丢弃
-- **出图**：Pillow 绘制 1080 宽信息卡（版本标题、前瞻时间、更新时间、新角色、详情链接）
-- **发送**：`ctx.chat.open_session(group)` 打开群聊流 → `ctx.send.image(base64)` 发图，单群失败不阻塞其他群
+### 1. 采集层：Adapter
+
+按「数据形态」分 5 个 adapter，不按游戏拆分，多款游戏复用：
+
+| Adapter | 数据形态 | 适用游戏 | 权重 |
+|---|---|---|---|
+| `mihoyo_json` | 米哈游 getAnnList/getAnnContent JSON | 崩铁、绝区零 | 1.0 |
+| `kuro_json` | 库洛 gamenotice JSON（单 URL 全量） | 鸣潮 | 1.0 |
+| `hg_json` | 鹰角 bulletinList/bulletin JSON | 明日方舟 | 1.0 |
+| `hg_ssr` | 鹰角官网 SSR HTML（内嵌 JSON 提取 cid） | 终末地 | 0.9 |
+| `bili_dynamic` | B站官方账号动态（wbi 签名） | 所有游戏的认证源 | 0.9 |
+
+每个游戏配置 `adapter`（主源）+ `extra_sources`（认证源），采集结果合并后进入解析。
+
+**B站动态源**：匿名访问 nav 接口拿 wbi 密钥 → 签名请求动态列表 → 提取动态文本。作为第二源提供同字段的不同声明，供交叉认证使用。
+
+### 2. 解析层：字段提取（validator.py）
+
+从标题+正文提取目标字段，剥离 HTML 后按游戏类型走不同规则：
+
+- **版本标识**：`version_pattern` 命名分组正则（`(?P<num>)`/`(?P<name>)`）；方舟等活动制从正文提取 SideStory 名
+- **更新时间**：中文日期（鸣潮"2026年7月10日04:00"）/ ISO 日期（米哈游 start_time）双模式
+- **下版本时刻**：米哈游 `end_time`（版本结束=下版本更新）
+- **前瞻时间**：正文"前瞻通讯将于 X"模式 + `known_dates` 覆盖
+- **新角色**：按游戏类型锚定章节提取（米哈游"全新角色"、终末地"全新干员"、方舟"新干员登场"段），排除光锥/武器/音擎等装备名
+- **下半池角色/时间**：正文"将于下半"模式、卡池公告"跃迁时间为"第二组、终末地"特许寻访开放时间"
+
+### 3. 认证层：交叉认证（aggregate）
+
+同一字段有多个源声明时，按加权聚合：
+
+```
+字段置信度 = 最高源权重 + 0.15 × (一致源数 - 1)，上限 1.0
+```
+
+- 低于 `publish_threshold`（默认 0.8）的字段标「待确认」
+- `known_dates`（官方已官宣，权重 1.5）必然覆盖推算值
+- 认证源匹配主条目：**活动名优先，版本号兜底**（方舟/终末地靠活动名，崩铁/绝区零靠版本号）
+
+### 4. 节奏层：6 周版本模型（timeline.py）
+
+每个游戏两个栏位，随版本进度推进：
+
+| 阶段 | 栏位A | 栏位B |
+|---|---|---|
+| 第 1 周 | 本版本·上半池（版本名+新角色） | 本版本·下半池 |
+| 第 2-4 周 | 本版本·下半池（+角色） | 下版本·前瞻 |
+| 第 5 周 | 下版本·前瞻（+角色） | 下版本·更新时间 |
+| 第 6 周 | 下版本·更新时间（+角色） | 下版本·上半池 |
+
+- **确定 vs 预估**：官方公告时间（含 end_time、卡池公告、known_dates）不标预估；周期推算（版本更新日 + cycle_days）标「（预估）」
+- 方舟是活动制（无版本号）：栏位A=本版本活动+新干员，栏位B=下版本预告（复刻·红丝绒）
+
+### 5. 渲染层：Pillow 出图（renderer.py）
+
+- `render_summary`：多游戏汇总长图，每款一个区块（游戏名+版本标题+两栏位），一次发送
+- 布局完全由 `formats/*.json` 驱动（栏位高度、字号、颜色、圆角），渲染代码不写死任何布局
+- 图片本地生成，不经过第三方图床
+
+---
 
 ## 安装
 
-1. 把本目录整个复制到 MaiBot 的 `plugins/` 下（目录名随意，如 `game-update-watcher`）
-2. 复制配置模板并编辑：`copy config.example.toml config.toml`（Linux: `cp config.example.toml config.toml`）
-3. 确认 MaiBot 环境已安装依赖：`pip install maibot-plugin-sdk httpx pillow`（httpx/pillow MaiBot 已内置，通常可跳过）
-4. 启动 MaiBot，插件自动加载（也可通过 WebUI 管理）
+1. 把本目录整个复制到 MaiBot 的 `plugins/` 下
+2. 复制配置模板：`copy config.example.toml config.toml`
+3. 确认依赖：`pip install httpx pillow`（MaiBot 通常已内置）
+4. 重启 MaiBot，日志出现"加载完成"即成功
 
-> `config.toml` 已被 .gitignore 排除，不会出现在仓库里；实际配置只存在于你的部署环境，避免 git 冲突。
+> `config.toml` 已被 .gitignore 排除，不提交仓库，避免 git 冲突。
+
+---
 
 ## 配置
 
-### config.toml（插件主配置，由 config.example.toml 复制而来）
+### config.toml
 
 ```toml
 [plugin]
 enabled = true
-scheduled_enabled = false          # 定时推送开关
-poll_interval_minutes = 360        # 定时轮询间隔（分钟）
-default_groups = ["123456789"]   # 定时推送目标群号（Tool/指令不受限）
+scheduled_enabled = false          # 定时推送开关（默认关，用 Tool/指令）
+poll_interval_minutes = 360        # 定时轮询间隔
+default_groups = []                # 定时推送目标群号（Tool/指令不受限）
 publish_threshold = 0.8            # 字段置信度发布阈值
 http_timeout_seconds = 15
-debug = false
+debug = false                      # true 时图片加水印 DEBUG
 ```
 
-### games/*.json（每游戏一份）
+### games/*.json
 
-- `adapter`：使用的采集器（mihoyo_json / hg_json / hg_ssr / kuro_json）
-- `version_pattern`：从标题提取版本号+版本名的正则，用命名分组 `(?P<num>)` / `(?P<name>)`
-  - 有版本号的游戏：`(?P<num>[\d.]+)版本「(?P<name>.+?)」` → 显示 `v4.4「鸣笛于归寂之时」`
-  - 无版本号的游戏（方舟）：留空，自动从「」提取活动名 → 显示 `「直到大地变成一颗酸橙」`
-- `title_include` / `title_exclude`：标题命中/排除关键词
-- `groups`：该游戏专属目标群，留空则用 `default_groups`
+每游戏一份配置，核心字段：
 
-新增游戏：在 `games/` 下加一个 JSON，选一个现有 adapter 填参数即可，不用写代码。
+- `adapter` / `adapter_params`：主源采集器及参数
+- `extra_sources`：认证源列表，如 `[{"adapter": "bili_dynamic", "params": {"uid": "B站UID"}}]`
+- `version_pattern`：版本号正则（命名分组 `(?P<num>)`/`(?P<name>)`）
+- `title_include` / `title_exclude`：候选标题命中/排除关键词
+- `cycle_days` / `half_days` / `preview_ahead_days`：版本节奏参数
+- `known_dates`：官方已官宣但接口未推送的时间，如 `{"preview_time": "2026-08-07 19:00"}`
+- `format`：引用 `formats/` 布局模板
+- `groups`：该游戏专属定时推送群，空则用全局
+
+---
 
 ## 自测（不启动 MaiBot）
 
 ```powershell
-cd plugins/game-update-watcher
-python selftest.py            # 全部游戏
-python selftest.py wuwa hsr   # 指定游戏
+python verify.py            # 一键验证：环境/语法/配置/真实采集
+python selftest.py          # 采集+解析+出图，生成 _selftest_out/*.png
 ```
 
-会真实请求各厂商接口、打印解析结果，并在 `_selftest_out/` 生成示例信息卡 PNG。
-
-## 出图与发送链路说明
-
-1. **出图**：`core/renderer.py` 用 Pillow 把 `GameUpdate` 画成 1080 宽 PNG，深色底 + 游戏主题色，字段逐行排列
-2. **编码**：PNG 读成 base64 字符串
-3. **发送**：
-   ```python
-   session = await self.ctx.chat.open_session(platform="qq", chat_type="group", group_id="123456789")
-   stream_id = session.get("stream_id") if isinstance(session, dict) else session
-   await self.ctx.send.image(image_data=base64_str, stream_id=stream_id)
-   ```
-
-图片是纯本地生成的，不经过任何第三方图床，QQ 群内直接显示。
-
-## 已知限制
-
-- 鸣潮接口 URL 带 hash，官方轮换后需更新 `games/wuwa.json` 里的 `notice_url`（可加 B站官号动态做认证源兜底）
-- 终末地是 HTML 解析（无 JSON 接口），官网改版需微调 `hg_ssr.py` 正则
-- 新角色提取用的是通用正则，个别角色名可能漏抓或误抓，可后续在 `core/validator.py` 的 `RE_CHARS` 里补充规则
+---
 
 ## 目录结构
 
 ```
 game-update-watcher/
-├── _manifest.json        # 插件清单
-├── config.toml           # 插件配置
-├── plugin.py             # MaiBot 插件入口（定时轮询+发送）
-├── selftest.py           # 独立自测脚本
-├── verify.py / verify.ps1 # 一键验证
+├── _manifest.json        # 插件清单（manifest v2）
+├── config.example.toml   # 配置模板（复制为 config.toml 使用）
+├── plugin.py             # MaiBot 插件入口（触发分发）
+├── selftest.py / verify.py / verify.ps1  # 验证工具
 ├── GUIDE.md              # 新增游戏接入指南
-├── formats/              # 布局模板（按类型）
-│   ├── version_based.json    # 版本制：游戏名+版本标题+两栏位
-│   └── activity_based.json   # 活动制：游戏名+活动标题+两栏位
-├── games/                # 每游戏一份配置（新增游戏看 GUIDE.md）
-│   ├── wuwa.json         # 鸣潮
-│   ├── arknights.json    # 明日方舟
-│   ├── endfield.json     # 终末地
-│   ├── zzz.json          # 绝区零
-│   └── hsr.json          # 崩铁
+├── formats/              # 布局模板（version_based / activity_based）
+├── games/                # 每游戏一份配置
 └── core/
-    ├── adapters/         # 采集层（4 个 adapter）
-    ├── models.py         # 数据模型
+    ├── adapters/         # 采集层（5 个 adapter）
+    ├── models.py         # 数据模型（GameConfig/GameUpdate/FieldClaim）
     ├── validator.py      # 字段提取 + 交叉认证
     ├── timeline.py       # 6 周阶段判定 + 两栏位生成
-    ├── pipeline.py       # 管道组装
+    ├── pipeline.py       # 管道组装（多源合并、认证源匹配）
     ├── renderer.py       # Pillow 出图（格式模板驱动）
-    └── store.py          # SQLite 去重
+    └── store.py          # SQLite 去重（定时推送用）
 ```
+
+---
+
+## 已知限制与存在问题
+
+### 数据源层面
+
+1. **鸣潮接口 URL 带 hash**：`games/wuwa.json` 的 `notice_url` 带固定 hash，官方轮换后需更新。B站动态认证源可作兜底，但 hash 失效时主源会采集失败
+2. **终末地无 JSON 接口**：`hg_ssr` 解析官网 HTML 内嵌 JSON，官网改版可能破坏 cid 提取正则，需要微调
+3. **B站匿名请求有间隔风控**：短时间连续请求会返回空列表。插件轮询间隔（默认 6 小时）不会触发，但调试/自测连续跑会踩到，表现为"认证源采集失败"或角色缺失，下次轮询自动恢复
+4. **米哈游"活动跃迁（其二）"公告可能不在主源接口**：下半池时间依赖 B站动态正文的"跃迁时间为"第二组提取，若 B站风控则退化为周期推算
+
+### 解析层面
+
+5. **角色提取是正则匹配，非语义识别**：个别角色名可能漏抓或误抓。已通过章节锚定（全新角色/全新干员/新干员登场）大幅降低误抓，但不能保证 100%
+6. **活动制游戏的认证源依赖动态措辞**：方舟/终末地靠活动名匹配（如「直到大地变成一颗酸橙」），如果 B站动态标题措辞与主源不一致（如只写"夏活"不写全名），匹配会失败，认证源被忽略
+7. **`_extract_section` 章节截断基于关键词**：如果公告正文章节标题措辞变化（如"全新角色"改成"新增角色"），starts 列表需补充
+
+### 架构层面
+
+8. **交叉认证的加权逻辑作用有限**：多源对同一字段的提取结果措辞不同，归一化后未必对齐，实际能交叉验证的主要是 `version_name` 和 `update_time`。角色类字段更多是"合并补充"而非"交叉验证"
+9. **tool 触发每次生成完整汇总**：用户在群里问三次会发三张同样的图（不过滤已发布）。这是刻意的（按需查询要当前状态），如需防刷可加频率限制
+10. **配置读取绕开了 MaiBot 的 config 能力**：因为 Host 侧能力授权问题，配置改为直接读 `config.toml` 文件（`tomllib`/`configparser` 双兼容），不依赖 `ctx.config`。这导致 WebUI 里的配置编辑对插件无效，改配置需直接编辑文件
+
+### 已知遗留
+
+11. **绝区零/崩铁的下半池时间在 B站风控时不可靠**：目前依赖 B站动态或周期推算，没有主源直连的卡池时间接口（米哈游 getAnnList 里可能没有独立的"活动跃迁"公告）
+12. **方舟复刻预告的下版本时间**：`next_start = 当前活动结束 + 1 天`，是周期推算，官方未预告时可能偏差 1~3 天
+
+---
 
 ## 新增游戏
 
-看 `GUIDE.md`：新建 `games/xxx.json` + 引用已有 format 即可，summary 自动适配，不改代码。
+看 `GUIDE.md`：新建 `games/xxx.json` + 引用已有 format 即可，summary 自动适配，不改代码。包含完整示例（原神）。

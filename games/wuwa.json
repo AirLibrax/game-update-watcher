@@ -4,6 +4,12 @@
   "theme_color": "#3B82F6",
   "format": "version_based",
   "adapter": "kuro_json",
+  "extra_sources": [
+    {
+      "adapter": "bili_dynamic",
+      "params": {"uid": "1955897084"}
+    }
+  ],
   "adapter_params": {
     "notice_url": "https://aki-gm-resources-back.aki-game.com/gamenotice/G152/76402e5b20be2c39f095a152090afddc/zh-Hans.json",
     "timeout": 15

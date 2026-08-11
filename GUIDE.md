@@ -41,6 +41,7 @@ summary 汇总图会自动从配置构成结构，新增游戏后下次轮询自
 | `format` | ❌ | 布局模板名，见 `formats/`，默认 `version_based` |
 | `adapter` | ✅ | 采集器，见下方适配器表 |
 | `adapter_params` | ✅ | 采集器参数（URL、game_id 等） |
+| `extra_sources` | ❌ | 额外认证源列表，如 B站官方账号动态 `[{"adapter": "bili_dynamic", "params": {"uid": "B站UID"}}]`，用于字段级交叉认证 |
 | `version_pattern` | ❌ | 从标题提取版本号的正则，命名分组 `(?P<num>)`/`(?P<name>)` |
 | `title_include` | ❌ | 标题必须包含的关键词之一 |
 | `title_exclude` | ❌ | 标题包含则排除的关键词 |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from core.adapters.base import BaseAdapter
+from core.adapters.bili_dynamic import BiliDynamicAdapter
 from core.adapters.hg_json import HgJsonAdapter
 from core.adapters.hg_ssr import HgSsrAdapter
 from core.adapters.kuro import KuroJsonAdapter
@@ -13,6 +14,7 @@ ADAPTERS: dict[str, type[BaseAdapter]] = {
     "hg_json": HgJsonAdapter,
     "hg_ssr": HgSsrAdapter,
     "kuro_json": KuroJsonAdapter,
+    "bili_dynamic": BiliDynamicAdapter,
 }
 
 

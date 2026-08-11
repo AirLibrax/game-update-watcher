@@ -2,20 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 
 # ---------- 字段级可信度模型 ----------
-
-# 信息源可信度等级（全局统一，可被游戏配置覆盖）
-SOURCE_WEIGHTS: dict[str, float] = {
-    "S": 1.0,   # 官方数据接口/官方社区 API
-    "A": 0.9,   # 官方内容出口（官网新闻、B站官号动态）
-    "B": 0.6,   # 权威第三方（wiki、Gamekee）
-    "C": 0.4,   # 泛第三方聚合
-    "D": 0.2,   # 社区爆料
-}
 
 # 每个字段可收集到的原始声明（来自不同源）
 @dataclass
@@ -29,7 +21,6 @@ class FieldClaim:
     @property
     def normalized(self) -> str:
         """归一化用于比较：去空白、统一全角/半角数字、小写。"""
-        import re
         v = re.sub(r"\s+", "", self.value)
         v = v.replace("：", ":").replace("，", ",").replace("（", "(").replace("）", ")")
         return v.lower()
@@ -85,8 +76,9 @@ class GameConfig:
     key: str                 # 配置文件里的 key，如 "wuwa"
     display: str             # "鸣潮"
     theme_color: str         # 卡片主题色 "#3B82F6"
-    adapter: str             # adapter 类型: kuro_json / mihoyo_json / hg_json / hg_ssr
+    adapter: str             # 主 adapter 类型: kuro_json / mihoyo_json / hg_json / hg_ssr
     adapter_params: dict[str, Any] = field(default_factory=dict)
+    extra_sources: list[dict[str, Any]] = field(default_factory=list)  # 额外认证源，如 [{"adapter": "bili_dynamic", "params": {...}}]
     fields: list[str] = field(default_factory=lambda: ["version", "preview_time", "update_time", "characters", "link"])
     groups: list[str] = field(default_factory=list)  # 空则用默认群
     version_pattern: str = ""  # 从标题提取版本号的正则，如 r"(?P<num>[\d.]+)版本「(?P<name>.+?)」"
@@ -113,6 +105,7 @@ class GameConfig:
             theme_color=d.get("theme_color", "#3B82F6"),
             adapter=d["adapter"],
             adapter_params=d.get("adapter_params", {}),
+            extra_sources=d.get("extra_sources", []),
             fields=d.get("fields", ["version", "preview_time", "update_time", "characters", "link"]),
             groups=d.get("groups", []),
             version_pattern=d.get("version_pattern", ""),

@@ -34,7 +34,7 @@ async def main() -> None:
         return
 
     # 收集所有游戏的时间线，最后生成汇总图
-    all_entries: list = []
+    all_entries: list[tuple] = []
     for cfg in cfgs.values():
         up_list = await collect_entries(pipeline, cfg, threshold=0.8)
         all_entries.extend(up_list)
@@ -48,9 +48,9 @@ async def main() -> None:
             print(f"\n[汇总图失败] {e}")
 
 
-async def collect_entries(pipeline: UpdatePipeline, cfg: GameConfig, threshold: float) -> list:
+async def collect_entries(pipeline: UpdatePipeline, cfg: GameConfig, threshold: float) -> list[tuple]:
     """单游戏采集+解析+出图，返回 (update, cfg, timeline) 列表供汇总图使用。"""
-    entries: list = []
+    entries: list[tuple] = []
     print(f"\n===== {cfg.display} (adapter: {cfg.adapter}) =====")
     try:
         candidates = await pipeline.collect_game(cfg, timeout=15.0)
