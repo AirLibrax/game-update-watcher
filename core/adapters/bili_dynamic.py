@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import hashlib
 import re
@@ -34,6 +35,14 @@ _MIXIN_KEY_ENC_TAB = [
 
 _NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
 _DYNAMIC_URL = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
+
+# 结果缓存：官方动态不是高频变化，缓存避免 5 个游戏连发请求触发 B站风控
+_CACHE_TTL_SECONDS = 900  # 15 分钟
+_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+# 全局节流：不同 uid 的连续请求也拉开间隔（B站对短时间多请求有风控）
+_MIN_REQUEST_GAP = 1.5  # 秒
+_last_request_time: float = 0.0
 
 
 def _get_mixin_key(orig: str) -> str:
@@ -82,6 +91,21 @@ class BiliDynamicAdapter(BaseAdapter):
     async def collect(self) -> list[dict[str, Any]]:
         p = self.params
         uid = str(p["uid"])
+
+        # 缓存命中：同一 uid 在 TTL 内直接返回上次结果，避免连发请求触发 B站风控
+        now = time.time()
+        cached = _cache.get(uid)
+        if cached and now - cached[0] < _CACHE_TTL_SECONDS:
+            self._log(f"B站动态缓存命中 uid={uid}，跳过网络请求")
+            return cached[1]
+
+        # 全局节流：距上次真实请求不足间隔则等待，避免不同 uid 连发触发风控
+        global _last_request_time
+        wait = _MIN_REQUEST_GAP - (now - _last_request_time)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_request_time = time.time()
+
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
             "Referer": "https://www.bilibili.com/",
@@ -134,6 +158,9 @@ class BiliDynamicAdapter(BaseAdapter):
                 dt = datetime.datetime.fromtimestamp(ts)
                 claims.append(FieldClaim(field="pub_time", value=dt.strftime("%Y-%m-%d %H:%M"), source=self.SOURCE_ID, weight=self.WEIGHT, url=url))
             items.append({"raw_title": text[:60], "claims": claims, "url": url, "raw": card})
+        # 只缓存非空结果：空列表（风控）不缓存，下次触发立即重试
+        if items:
+            _cache[uid] = (time.time(), items)
         return items
 
     def _extract_text(self, card: dict) -> str:

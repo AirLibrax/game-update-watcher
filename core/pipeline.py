@@ -133,17 +133,20 @@ class UpdatePipeline:
             if not auth_name and not auth_ver:
                 continue
             target_idx = None
+            match_by = ""
             # 优先活动名（版本名）匹配
             if auth_name:
                 for i, up in enumerate(updates):
                     if up.version_name and up.version_name == auth_name:
                         target_idx = i
+                        match_by = f"活动「{auth_name}」"
                         break
             # 版本号兜底
             if target_idx is None and auth_ver:
                 for i, up in enumerate(updates):
                     if up.version_num and up.version_num == auth_ver:
                         target_idx = i
+                        match_by = f"v{auth_ver}"
                         break
             if target_idx is None:
                 continue
@@ -156,10 +159,7 @@ class UpdatePipeline:
             merged_claims = base_claims + auth_claims
             verdicts = aggregate(merged_claims, publish_threshold)
             updates[target_idx].fields = verdicts
-            self._log(
-                f"[{cfg.display}] 认证源匹配 {'活动「' + auth_name + '」' if auth_name else 'v' + auth_ver}，"
-                f"合并 {len(auth_claims)} 条字段声明"
-            )
+            self._log(f"[{cfg.display}] 认证源匹配 {match_by}，合并 {len(auth_claims)} 条字段声明")
 
         # 把卡池公告的官方下半池时间注入主版本条目
         if half_starts and updates:
@@ -230,13 +230,22 @@ class UpdatePipeline:
 
         活动名优先（B站动态标题如「向渊行」版本更新说明 可提取出 '向渊行'），
         版本号兜底（如 "4.4版本活动跃迁（其二）" 提取 '4.4'）。
-        活动名取 extract_fields 提取的 version_name（主源与认证源同规则，措辞一致才能匹配）。
+        活动名取 extract_fields 提取的 version_name，并清洗掉乱文
+        （B站动态可能把角色名或整段正文当 version_name，需过滤）。
         """
         claims = auth_claims if auth_claims is not None else extract_fields(item, cfg)
         name = ""
         for c in claims:
             if c.field == "version_name" and c.value:
-                name = c.value.strip()
+                candidate = c.value.strip()
+                # 清洗：排除含换行/过长/含正文特征词的乱文
+                if (
+                    "\n" in candidate
+                    or len(candidate) > 20
+                    or any(k in candidate for k in ("亲爱的", "开拓者", "管理员", "博士", "漂泊者", "大家好", "欢迎"))
+                ):
+                    continue
+                name = candidate
                 break
         ver = ""
         m = re.search(r"(\d+\.\d+)\s*版本", item.get("raw_title", ""))
