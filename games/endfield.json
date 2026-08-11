@@ -1,0 +1,19 @@
+{
+  "display": "明日方舟：终末地",
+  "short": "终末地",
+  "theme_color": "#2F6F4F",
+  "format": "version_based",
+  "adapter": "hg_ssr",
+  "adapter_params": {
+    "news_url": "https://endfield.hypergryph.com/news",
+    "timeout": 15
+  },
+  "fields": ["version_name", "update_time", "characters"],
+  "version_pattern": "「(?P<name>.+?)」版本更新说明",
+  "title_include": ["版本更新说明", "版本更新公告", "前瞻"],
+  "title_exclude": ["封禁", "特卖", "申领", "征集", "测试", "网页活动"],
+  "cycle_days": 42,
+  "half_days": 21,
+  "preview_ahead_days": 7,
+  "groups": []
+}

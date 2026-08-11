@@ -1,0 +1,26 @@
+{
+  "display": "崩坏：星穹铁道",
+  "short": "崩铁",
+  "theme_color": "#6A5AE0",
+  "format": "version_based",
+  "adapter": "mihoyo_json",
+  "adapter_params": {
+    "api_base": "https://hkrpg-api-static.mihoyo.com",
+    "game": "hkrpg",
+    "game_biz": "hkrpg_cn",
+    "bundle_id": "hkrpg_cn",
+    "region": "prod_gf_cn",
+    "level": 30,
+    "uid": "11111111",
+    "web_base": "https://sr.mihoyo.com/news",
+    "timeout": 15
+  },
+  "fields": ["version", "preview_time", "update_time", "characters", "link"],
+  "version_pattern": "(?P<num>[\\d.]+)版本「(?P<name>.+?)」",
+  "title_include": ["版本更新", "活动跃迁"],
+  "title_exclude": ["已知问题", "优化", "修复", "新增关卡", "概率公示", "封禁", "光锥", "音乐专辑"],
+  "cycle_days": 42,
+  "half_days": 21,
+  "preview_ahead_days": 7,
+  "groups": []
+}

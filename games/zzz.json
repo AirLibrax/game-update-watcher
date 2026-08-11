@@ -1,0 +1,27 @@
+{
+  "display": "绝区零",
+  "short": "绝区零",
+  "theme_color": "#E0483E",
+  "format": "version_based",
+  "adapter": "mihoyo_json",
+  "adapter_params": {
+    "api_base": "https://announcement-api.mihoyo.com",
+    "game": "nap",
+    "game_biz": "nap_cn",
+    "bundle_id": "nap_cn",
+    "region": "prod_gf_cn",
+    "channel_id": 1,
+    "level": 60,
+    "uid": "11111111",
+    "web_base": "https://zzz.mihoyo.com/news",
+    "timeout": 15
+  },
+  "fields": ["version", "preview_time", "update_time", "characters", "link"],
+  "version_pattern": "(?P<num>[\\d.]+)版本「(?P<name>.+?)」",
+  "title_include": ["更新公告", "更新说明", "版本更新", "调频"],
+  "title_exclude": ["已知问题", "优化", "修复", "新增关卡", "概率公示", "封禁", "活动说明"],
+  "cycle_days": 42,
+  "half_days": 21,
+  "preview_ahead_days": 7,
+  "groups": []
+}

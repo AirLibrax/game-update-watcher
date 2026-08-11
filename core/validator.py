@@ -1,0 +1,337 @@
+"""交叉认证引擎 + 字段解析规则。
+
+两层：
+1. extract: 从 adapter 原始条目（标题+正文）按游戏配置的规则提取目标字段声明
+2. aggregate: 同字段多源声明加权聚合，计算置信度（字段级交叉认证）
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime
+from typing import Any
+
+from core.models import FieldClaim, FieldVerdict, GameConfig
+
+# ---------- 通用时间/内容提取正则 ----------
+
+DATE_CN = r"\d{4}年\d{1,2}月\d{1,2}日"
+DATE_MD = r"\d{1,2}月\d{1,2}日"
+TIME_HM = r"\d{1,2}:\d{2}"
+
+# 维护/更新时间：如 "2026年7月10日04:00 ~ 2026年7月10日11:00（UTC+8）"
+RE_MAINT = re.compile(
+    rf"((?:维护|更新)[^：:]*[：:]\s*)?({DATE_CN}\s*{TIME_HM}?\s*[~～\-—至到]\s*{DATE_CN}\s*{TIME_HM}?)"
+)
+# 前瞻/直播时间：如 "前瞻通讯将于2026年8月7日19:00 播出" / "8月7日19:00"
+RE_PREVIEW = re.compile(
+    rf"(前瞻|特别通讯|直播|前瞻通讯)[^。\n]{{0,40}}({DATE_CN}|{DATE_MD})\s*({TIME_HM})?"
+)
+# 新角色：优先从「xxx」角色活动唤取/限时寻访模式提取（米哈游/库洛公告正文常见）
+#   例：5星共鸣者「秧秧・玄翎」（湮灭 | 迅刀） / 5星「姬子•启行（智识•火）」
+#   负向前瞻排除 光锥/武器/音擎/遗器，防止 "5星光锥「当一颗星照亮夜空」" 这类把装备名当角色
+RE_CHAR_BANNER = re.compile(
+    r"(?:★{1,6}|\d\s*星|五星|四星|S级|A级)\s*(?![^「』]{0,6}?(?:光锥|武器|音擎|遗器))\s*(?:共鸣者|角色|干员|代理人|特勤|英雄|邦布)?\s*[「『\[]?\s*([^」』\]「『\s,，、()（）【】\n]{1,12})\s*[」』\]]?"
+)
+# 兜底：正文里的「xxx」词组（排除明显不是角色的）
+RE_CHARS = re.compile(r"[「『]([^」』]{1,12})[」』]")
+
+# 下半池角色：如 "刻律德菈、那刻夏与砂金则将于下半回归跃迁" / "将于版本下半登场"
+RE_HALF_CHAR = re.compile(
+    r"([\u4e00-\u9fff·、]{2,24}?)(?:则)?(?:将)?于(?:版本)?下半(?:期)?(?:回归|复刻|登场|开启|跃迁|活动)"
+)
+BAD_CHAR_WORDS = (
+    "维护", "更新", "补偿", "时间", "活动", "版本", "前瞻", "直播",
+    "武器", "皮肤", "时装", "套装", "奖励", "商店", "任务", "概率",
+    "说明", "公告", "开启", "上线", "兑换", "签到", "礼包", "联动",
+    "优化", "修复", "问题", "调整", "追加", "亲爱的", "漂泊者", "玩家",
+    "博士", "绳匠", "开拓者", "内容", "介绍", "敬请", "关注",
+    "光锥", "武器", "遗器", "装饰", "头像", "名片", "宠物", "家具",
+    "音擎", "邦布", "模型",
+)
+
+# 活动标题后缀清理：去掉公告类后缀词，只留活动名核心
+_ACTIVITY_SUFFIXES = (
+    "限定寻访开启", "限定寻访说明", "活动限时开启", "限时开启", "开启",
+    "创作征集活动进行中", "创作征集", "复刻活动", "活动预告", "即将开启",
+    "复刻", "说明", "公告",
+)
+
+
+def _clean_activity_name(title: str) -> str:
+    """把 '车辙与风的归所限定寻访开启' 清理为 '车辙与风的归所'。"""
+    name = title.strip()
+    for suf in sorted(_ACTIVITY_SUFFIXES, key=len, reverse=True):
+        if name.endswith(suf):
+            name = name[: -len(suf)].strip()
+            break
+    return name or title.strip()
+
+
+def _fmt_date_hm(s: str) -> str:
+    """把 '2026年7月10日 04:00' 归一为 '2026-07-10 04:00'。"""
+    s = s.strip()
+    try:
+        m = re.match(rf"({DATE_CN})\s*({TIME_HM})?", s)
+        if not m:
+            return s
+        date_s, time_s = m.group(1), m.group(2)
+        dt = datetime.strptime(date_s, "%Y年%m月%d日")
+        return f"{dt:%Y-%m-%d}" + (f" {time_s}" if time_s else "")
+    except Exception:
+        return s
+
+
+def _strip_html(s: str) -> str:
+    """剥掉 HTML 标签，保留可读文本（各 adapter 的 content 可能是原始 HTML）。"""
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)
+    s = re.sub(r"</?(?:div|p|li|h\d)[^>]*>", "\n", s, flags=re.I)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = s.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    return s
+
+
+def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
+    """把 adapter 原始条目按游戏配置提取为目标字段声明。"""
+    claims: list[FieldClaim] = item["claims"]
+    title = item.get("raw_title", "")
+
+    # 已知确定时间覆盖（games/*.json 的 known_dates，官方已官宣）
+    known = cfg.known_dates
+    known_claims: list[FieldClaim] = []
+    for fld, val in known.items():
+        if val:
+            known_claims.append(FieldClaim(fld, val, "known", 1.0, ""))
+
+    # 正文合并（多段 content 拼接），统一剥 HTML 再匹配
+    contents = [c.value for c in claims if c.field == "content"]
+    content = "\n".join(_strip_html(c) for c in contents)
+    source_url = item.get("url", "")
+
+    out: list[FieldClaim] = []
+
+    # 1. 版本号+版本名：优先用配置的命名分组正则从标题提取
+    #    约定分组名：(?P<num>...) 版本号 / (?P<name>...) 版本名或活动名
+    #    方舟（活动制）：优先从正文提取 SideStory 名（如 SideStory「直到大地变成一颗酸橙」）
+    vp = cfg.version_pattern
+    got_name = False
+    if cfg.activity_mode and content:
+        m_ss = re.search(r"SideStory「([^」]+)」|「([^」]+)」活动开启|「([^」]+)」限时活动", content)
+        if m_ss:
+            name = next((g for g in m_ss.groups() if g), "")
+            if name:
+                out.append(FieldClaim("version_name", name.strip(), "parse", 1.0, source_url))
+                got_name = True
+        # 活动时间："活动时间：08月01日 12:00 - 08月29日 03:59" → 提取起始日
+        m_at = re.search(r"活动时间[：:]\s*(\d{1,2})月(\d{1,2})日", content)
+        if m_at:
+            # 年份取当前年（公告通常年内活动）
+            year = datetime.now().year
+            out.append(FieldClaim(
+                "update_time",
+                f"{year}-{int(m_at.group(1)):02d}-{int(m_at.group(2)):02d}",
+                "parse", 1.0, source_url,
+            ))
+        else:
+            # 正文没有活动时间，用公告发布日期兜底（displayTime）
+            for c in claims:
+                if c.field == "display_time" and c.value:
+                    out.append(FieldClaim("update_time", c.value, "parse", 1.0, source_url))
+                    break
+    if vp:
+        m = re.search(vp, title)
+        if m:
+            name = m.groupdict().get("name") or (m.group(1) if m.lastindex == 1 else "")
+            num = m.groupdict().get("num")
+            if name and not got_name:
+                out.append(FieldClaim("version_name", name.strip(), "parse", 1.0, source_url))
+            if num:
+                out.append(FieldClaim("version", num.strip(), "parse", 1.0, source_url))
+        elif not got_name:
+            # 提不到版本号但有「」名字 → 活动制（方舟）
+            nm = re.search(r"[「『]([^」』]+)[」』]", title)
+            if nm:
+                out.append(FieldClaim("version_name", nm.group(1).strip(), "parse", 1.0, source_url))
+            elif title:
+                out.append(FieldClaim("version_name", _clean_activity_name(title), "parse", 1.0, source_url))
+    elif title and not got_name:
+        nm = re.search(r"[「『]([^」』]+)[」』]", title)
+        name = nm.group(1).strip() if nm else _clean_activity_name(title)
+        out.append(FieldClaim("version_name", name, "parse", 1.0, source_url))
+
+    # 2. 更新时间（维护时间）：鸣潮等用中文日期；米哈游用 ISO/斜杠格式，正文提取失败则透传 adapter 的 start_time
+    maint_found = False
+    for m in RE_MAINT.finditer(content):
+        out.append(FieldClaim("update_time", _fmt_date_hm(m.group(2)), "parse", 1.0, source_url))
+        maint_found = True
+    if not maint_found:
+        for c in claims:
+            if c.field in ("update_time", "start_time") and c.value:
+                out.append(FieldClaim("update_time", c.value, "parse", 1.0, source_url))
+                break
+    # 2b. 下版本更新时刻：米哈游的 end_time 即版本结束=下版本更新时间（如绝区零 end 2026-09-09 = 3.2 更新）
+    for c in claims:
+        if c.field == "end_time" and c.value:
+            out.append(FieldClaim("next_update_time", c.value, "parse", 1.0, source_url))
+            break
+
+    # 3. 前瞻时间
+    for m in RE_PREVIEW.finditer(content):
+        out.append(FieldClaim("preview_time", _fmt_date_hm(f"{m.group(2)} {m.group(3) or ''}"), "parse", 1.0, source_url))
+
+    # 4. 新角色：策略按游戏类型区分，宁可少抓不可抓错
+    #    - 方舟（活动制）：用 ★★★★：干员名 格式提取
+    #    - 库洛（鸣潮）：正文「」基本都是角色名/版本名，允许兜底
+    #    - 米哈游：只用星级前缀模式（全新五星角色「xxx」），避免抓错
+    char_names: list[str] = []
+    if cfg.activity_mode:
+        # 方舟：当期新干员 = 主活动公告"新干员登场"段的全部星级干员
+        #   原文：五、「夏日嘉年华」新干员登场
+        #   ★★★★★★：予愿安洁莉娜[限定]
+        #   ★★★★★★：珊比
+        #   ★★★★★：嘉辛塔
+        #   ★★★★★：时隙
+        def _extract_ark_seg(seg: str) -> list[str]:
+            out: list[str] = []
+            seg = re.split(r"[（(]", seg)[0]
+            for part in re.split(r"[\\/、,，]", seg):
+                name = part.strip()
+                name = re.sub(r"\[.*?\]", "", name).strip()  # 去 [限定]
+                name = re.sub(r"[【】\[\]]", "", name).strip()  # 清全角/半角括号残留
+                name = re.sub(r"[\d*×%：:]\s*", "", name).strip()
+                if name and not any(w in name for w in BAD_CHAR_WORDS) and 2 <= len(name) <= 12:
+                    out.append(name)
+            return out
+
+        # 锚定"新干员"段：找到"新干员"或"新增干员"字样后，提取其后的全部星级行
+        # 注意：6★ 和 5★ 行要混在一起匹配，不能用 (6★+)|(5★+) 交替（会只取其中一种）
+        m_new = re.search(
+            r"(?:新干员登场|新增干员)[^★]{0,80}?((?:(?:★{6}|★{5})[：:][^★\n】]+\s*\n?\s*)+)",
+            content,
+        )
+        if m_new:
+            block = m_new.group(1)
+            for mm in re.finditer(r"★{6}[：:]\s*([^★\n】]+)|★{5}[：:]\s*([^★\n】]+)", block):
+                seg = mm.group(1) or mm.group(2)
+                char_names.extend(_extract_ark_seg(seg))
+        # 兜底：没有"新干员"段时，取第一个6★段 + 第一个5★段
+        if not char_names:
+            m6 = re.search(r"★{6}[：:]\s*([^★\n】]+)", content)
+            if m6:
+                char_names.extend(_extract_ark_seg(m6.group(1)))
+            m5 = re.search(r"★{5}[：:]\s*([^★\n】]+)", content)
+            if m5:
+                char_names.extend(_extract_ark_seg(m5.group(1)))
+    else:
+        allow_bracket_fallback = cfg.adapter == "kuro_json"
+        for m in RE_CHAR_BANNER.finditer(content):
+            name = m.group(1).strip()
+            if name and not any(w in name for w in BAD_CHAR_WORDS) and not re.search(r"[\d*×%]|：|:", name):
+                char_names.append(name)
+        if allow_bracket_fallback and not char_names:
+            for m in RE_CHARS.finditer(content):
+                name = m.group(1).strip()
+                if not name:
+                    continue
+                if any(w in name for w in BAD_CHAR_WORDS) or re.search(r"[\d*×%]|：|:", name):
+                    continue
+                if 2 <= len(name) <= 8:
+                    char_names.append(name)
+    # 去重保序
+    seen_c = set()
+    for name in char_names:
+        if name not in seen_c:
+            seen_c.add(name)
+            out.append(FieldClaim("characters", name, "parse", 1.0, source_url))
+
+    # 5. 下半池角色（如崩铁："刻律德菈、那刻夏与砂金则将于下半回归跃迁"）
+    half_chars: list[str] = []
+    for m in RE_HALF_CHAR.finditer(content):
+        seg = m.group(1)
+        names = [n.strip() for n in re.split(r"[、与和、/，,]", seg) if n.strip()]
+        for n in names:
+            n = re.sub(r"[\d*×%]|：|:", "", n).strip()
+            if n and not any(w in n for w in BAD_CHAR_WORDS) and 2 <= len(n) <= 8:
+                half_chars.append(n)
+    for n in half_chars:
+        out.append(FieldClaim("half_characters", n, "parse", 1.0, source_url))
+
+    # 5b. 米哈游卡池公告："活动跃迁（其二）" / "调频（第二期）" 提供官方下半池开始时间
+    #     这类公告不是版本条目，只提取 half_start 供主条目使用
+    if "（其二）" in title or "（第二期）" in title or "下半" in title:
+        for c in claims:
+            if c.field == "start_time" and c.value:
+                out.append(FieldClaim("half_start", c.value, "parse", 1.0, source_url))
+                break
+
+    # 6. 链接
+    if source_url:
+        out.append(FieldClaim("link", source_url, "parse", 1.0, source_url))
+
+    # 7. 已知确定时间覆盖：追加到末尾，aggregate 按权重取最高（known=1.0 与 parse 持平，但排在后面会被归一化去重）
+    for c in known_claims:
+        out.append(c)
+
+    return out
+
+
+def aggregate(claims: list[FieldClaim], publish_threshold: float) -> dict[str, FieldVerdict]:
+    """字段级交叉认证：同字段多源声明 → 加权置信度。
+
+    置信度 = 最高源权重 + 0.15 × (一致源数 - 1)，上限 1.0。
+    字段声明之间 value 归一化后相同视为「一致」。
+    """
+    by_field: dict[str, list[FieldClaim]] = {}
+    for c in claims:
+        if not c.value:
+            continue
+        by_field.setdefault(c.field, []).append(c)
+
+    verdicts: dict[str, FieldVerdict] = {}
+    for field, fs in by_field.items():
+        if field in ("raw_title", "content", "ann_id", "category", "display_time", "tag_label",
+                     "start_time", "end_time", "start_time_ms", "end_time_ms", "publish_time_ms"):
+            continue
+        if field in ("characters", "half_characters"):
+            seen_vals: list[str] = []
+            for c in fs:
+                v = c.value.strip()
+                if v and v not in seen_vals:
+                    seen_vals.append(v)
+            if seen_vals:
+                verdicts[field] = FieldVerdict(
+                    field=field,
+                    value=",".join(seen_vals),
+                    confidence=1.0,
+                    sources=sorted({c.source for c in fs}),
+                    pending=False,
+                )
+            continue
+        # 按归一化值分组
+        groups: dict[str, list[FieldClaim]] = {}
+        for c in fs:
+            groups.setdefault(c.normalized, []).append(c)
+
+        # 取包含最高权重源的那组为主值；其余组视为候选
+        best_group = max(groups.values(), key=lambda g: max(c.weight for c in g))
+        best_val = best_group[0].value
+        best_weight = max(c.weight for c in best_group)
+
+        # 其他组中与 best 归一化一致的（同一组），以及跨组一致的要数进来
+        # 简化：统计有多少不同源（source_id）的值归一化后与 best 一致
+        consistent_sources = {c.source for c in best_group}
+        for other in fs:
+            if other.normalized == best_group[0].normalized:
+                consistent_sources.add(other.source)
+        n = len(consistent_sources)
+
+        conf = min(1.0, best_weight + 0.15 * (n - 1))
+        pending = conf < publish_threshold
+        verdicts[field] = FieldVerdict(
+            field=field,
+            value=best_val,
+            confidence=conf,
+            sources=sorted(consistent_sources),
+            pending=pending,
+        )
+    return verdicts

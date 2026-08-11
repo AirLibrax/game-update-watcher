@@ -1,0 +1,24 @@
+{
+  "name": "activity_based",
+  "description": "活动制游戏（明日方舟）：游戏名 + 活动标题 + 两栏位（本版本/下版本预告）",
+  "block": {
+    "show_game_name": true,
+    "show_version_title": true,
+    "game_name_font": 32,
+    "version_title_font": 40,
+    "block_gap": 44
+  },
+  "slot": {
+    "height": 168,
+    "label_font": 28,
+    "main_font": 38,
+    "chars_font": 30,
+    "show_chars": true
+  },
+  "card": {
+    "radius": 16,
+    "fill": "#171B23",
+    "outline": "#2A3140",
+    "accent_bar": true
+  }
+}

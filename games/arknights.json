@@ -1,0 +1,20 @@
+{
+  "display": "明日方舟",
+  "short": "方舟",
+  "theme_color": "#333C44",
+  "format": "activity_based",
+  "adapter": "hg_json",
+  "adapter_params": {
+    "api_base": "https://ak-webview.hypergryph.com",
+    "target": "IOS",
+    "timeout": 15
+  },
+  "fields": ["version_name", "update_time", "characters"],
+  "version_pattern": "",
+  "title_include": ["SideStory", "夏日嘉年华", "限定寻访", "故事集", "制作组通讯", "复刻", "活动"],
+  "title_exclude": ["时装", "周边", "皮肤", "模组", "战绩", "签到", "充值", "掉落", "修复", "维护补偿", "创作征集", "网页活动", "应援", "上架", "复刻上架", "特限模组"],
+  "activity_mode": true,
+  "cycle_days": 28,
+  "show_link": false,
+  "groups": []
+}

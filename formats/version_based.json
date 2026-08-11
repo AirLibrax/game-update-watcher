@@ -1,0 +1,24 @@
+{
+  "name": "version_based",
+  "description": "版本制游戏（鸣潮/崩铁/绝区零/终末地）：游戏名 + 版本标题 + 两栏位（上下池/前瞻/下版本）",
+  "block": {
+    "show_game_name": true,
+    "show_version_title": true,
+    "game_name_font": 32,
+    "version_title_font": 40,
+    "block_gap": 44
+  },
+  "slot": {
+    "height": 168,
+    "label_font": 28,
+    "main_font": 38,
+    "chars_font": 30,
+    "show_chars": true
+  },
+  "card": {
+    "radius": 16,
+    "fill": "#171B23",
+    "outline": "#2A3140",
+    "accent_bar": true
+  }
+}

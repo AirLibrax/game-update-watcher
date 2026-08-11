@@ -1,0 +1,27 @@
+# 插件配置：game-update-watcher
+# 编辑后保存即可热重载（scope=self），或重启 MaiBot
+
+[plugin]
+enabled = true
+
+# 触发方式：
+# 1. Tool「游戏更新速报」—— 麦麦的 LLM 在对话中判断需要时自动调用（推荐，默认）
+# 2. 指令 /游戏速报 —— 群里手动触发
+# 3. 定时轮询 —— 下面 scheduled_enabled=true 时启用，按间隔发到 default_groups
+scheduled_enabled = false
+
+# 定时轮询周期（分钟），仅 scheduled_enabled=true 时生效
+poll_interval_minutes = 360
+
+# 定时推送的目标 QQ 群号列表（字符串数组）
+# Tool/指令触发不受此限制，发到当前对话所在群
+default_groups = []
+
+# 发布阈值：字段置信度达到该值才上卡片（0.5~1.0）
+publish_threshold = 0.8
+
+# 请求超时（秒）
+http_timeout_seconds = 15
+
+# 是否调试模式（打印更多日志，图片加水印 DEBUG）
+debug = false
