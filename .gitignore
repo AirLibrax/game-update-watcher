@@ -16,3 +16,6 @@ python
 # 本地私有配置（如有）
 *.local.toml
 .env
+
+# 本地插件配置（模板为 config.example.toml，实际配置不入库）
+config.toml

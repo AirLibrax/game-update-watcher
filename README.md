@@ -30,20 +30,23 @@ MaiBot 插件：定时采集多款游戏版本更新信息，交叉认证后渲�
 ## 安装
 
 1. 把本目录整个复制到 MaiBot 的 `plugins/` 下（目录名随意，如 `game-update-watcher`）
-2. 确认 MaiBot 环境已安装依赖：`pip install maibot-plugin-sdk httpx pillow`
-3. 启动 MaiBot，插件自动加载（也可通过 WebUI 管理）
+2. 复制配置模板并编辑：`copy config.example.toml config.toml`（Linux: `cp config.example.toml config.toml`）
+3. 确认 MaiBot 环境已安装依赖：`pip install maibot-plugin-sdk httpx pillow`（httpx/pillow MaiBot 已内置，通常可跳过）
+4. 启动 MaiBot，插件自动加载（也可通过 WebUI 管理）
+
+> `config.toml` 已被 .gitignore 排除，不会出现在仓库里；实际配置只存在于你的部署环境，避免 git 冲突。
 
 ## 配置
 
-### config.toml（插件主配置）
+### config.toml（插件主配置，由 config.example.toml 复制而来）
 
 ```toml
 [plugin]
 enabled = true
-poll_interval_minutes = 360      # 轮询间隔（分钟）
-default_groups = ["123456789"]   # 默认目标 QQ 群号列表（字符串数组）
-show_pending_fields = true       # 是否显示「待确认」字段
-publish_threshold = 0.8          # 字段置信度发布阈值
+scheduled_enabled = false          # 定时推送开关
+poll_interval_minutes = 360        # 定时轮询间隔（分钟）
+default_groups = ["123456789"]   # 定时推送目标群号（Tool/指令不受限）
+publish_threshold = 0.8            # 字段置信度发布阈值
 http_timeout_seconds = 15
 debug = false
 ```

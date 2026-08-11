@@ -1,5 +1,6 @@
-# 插件配置：game-update-watcher
-# 编辑后保存即可热重载（scope=self），或重启 MaiBot
+# 插件配置模板：复制本文件为 config.toml 后编辑
+#   cp config.example.toml config.toml   （Windows: copy config.example.toml config.toml）
+# config.toml 已被 .gitignore 排除，不会提交到 Git，避免配置冲突
 
 [plugin]
 enabled = true

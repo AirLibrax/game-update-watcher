@@ -24,7 +24,7 @@
     "max_version": "9.99.99"
   },
   "dependencies": [],
-  "capabilities": ["send", "chat"],
+  "capabilities": ["send", "chat", "config"],
   "i18n": {
     "default_locale": "zh-CN",
     "supported_locales": ["zh-CN"]
