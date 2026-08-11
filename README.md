@@ -103,8 +103,6 @@ Tool/指令触发不需要配置群号，发到"当前对话所在的群"；定�
 3. 确认依赖：`pip install httpx pillow`（MaiBot 通常已内置）
 4. 重启 MaiBot，日志出现"加载完成"即成功
 
-> `config.toml` 已被 .gitignore 排除，不提交仓库，避免 git 冲突。
-
 ---
 
 ## 配置
