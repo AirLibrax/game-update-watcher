@@ -1,6 +1,7 @@
 {
   "display": "明日方舟",
   "short": "方舟",
+  "aliases": ["方舟", "明日方舟"],
   "theme_color": "#333C44",
   "format": "activity_based",
   "adapter": "hg_json",

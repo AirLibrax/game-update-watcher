@@ -45,9 +45,10 @@ summary 汇总图会自动从配置构成结构，新增游戏后下次轮询自
 | `version_pattern` | ❌ | 从标题提取版本号的正则，命名分组 `(?P<num>)`/`(?P<name>)` |
 | `title_include` | ❌ | 标题必须包含的关键词之一 |
 | `title_exclude` | ❌ | 标题包含则排除的关键词 |
-| `cycle_days` | ❌ | 版本周期天数，默认 42（鸣潮 35） |
-| `half_days` | ❌ | 上半池→下半池切换天数，默认 21 |
+| `cycle_days` | ❌ | 版本周期天数，默认 42（鸣潮 35）——**每款游戏可自定义** |
+| `half_days` | ❌ | 上半池→下半池切换天数，默认 21（鸣潮 18） |
 | `preview_ahead_days` | ❌ | 前瞻在版本更新前 N 天，默认 7 |
+| `activity_mode` | ❌ | true=活动制（如方舟），无版本号、不走周数，栏位按活动周期展示 |
 | `known_dates` | ❌ | 已官宣的确定时间覆盖，如 `{"preview_time": "2026-08-07 19:00"}` |
 | `groups` | ❌ | 该游戏专属目标群，空则用全局 default_groups |
 
@@ -84,7 +85,7 @@ summary 汇总图会自动从配置构成结构，新增游戏后下次轮询自
 }
 ```
 
-支持字段：`preview_time` / `next_update_time` / `half_start` / `update_time`。
+支持字段：`preview_time` / `next_update_time` / `half_start` / `update_time` / `activity_end`。
 新版本公告上线后接口会自动覆盖这些值，known_dates 可以留着不管（同值去重）。
 
 ## 完整示例：新增"原神"

@@ -1,6 +1,7 @@
 {
   "display": "崩坏：星穹铁道",
   "short": "崩铁",
+  "aliases": ["崩铁", "星穹铁道"],
   "theme_color": "#6A5AE0",
   "format": "version_based",
   "adapter": "mihoyo_json",
@@ -28,5 +29,10 @@
   "cycle_days": 42,
   "half_days": 21,
   "preview_ahead_days": 7,
+  "known_dates": {
+    "preview_time": "2026-08-14 19:30",
+    "next_version": "4.5",
+    "next_name": "挥掷千星的筹码"
+  },
   "groups": []
 }

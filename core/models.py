@@ -91,6 +91,7 @@ class GameConfig:
     show_link: bool = True      # 卡片是否显示详情链接（方舟去掉）
     known_dates: dict[str, str] = field(default_factory=dict)  # 已官宣的确定时间覆盖，如 {"preview_time": "2026-08-07 19:00"}
     format: str = "version_based"  # 引用 formats/ 下的布局模板名
+    aliases: list[str] = field(default_factory=list)  # 指令匹配别名，如 ["终末地", "明日方舟终末地"]
 
     @classmethod
     def from_dict(cls, key: str, d: dict[str, Any]) -> "GameConfig":
@@ -117,4 +118,5 @@ class GameConfig:
             show_link=bool(d.get("show_link", True)),
             known_dates=dict(d.get("known_dates", {})),
             format=str(d.get("format", "version_based")),
+            aliases=list(d.get("aliases", [])),
         )

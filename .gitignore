@@ -17,6 +17,9 @@ python
 bili_test.py
 hg_ssr_test.py
 
+# 临时文件（工作区 臨时目录，不进仓库）
+_tmp/
+
 # 本地私有配置（如有）
 *.local.toml
 .env

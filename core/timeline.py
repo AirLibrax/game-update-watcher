@@ -1,4 +1,4 @@
-"""版本节奏时间线：根据当前日期计算 6 周大版本的阶段，生成两栏位内容。
+"""版本节奏时间线：根据当前日期计算 6 周大版本的阶段，生成栏位内容。
 
 版式约定（用户定义）：
     大字 = 内容标识（版本名 / 版本号 / 下半池 / 前瞻）
@@ -7,7 +7,7 @@
 
 模型：
     一个大版本 = cycle_days 天（默认 42，鸣潮 35）
-    每个游戏两个栏位，随版本进度推进：
+    版本制游戏两个栏位，随版本进度推进：
 
     第 1 周   (t < 7d)   栏位A=本版本上半池     栏位B=本版本下半池
     第 2-4 周 (7d~28d)   栏位A=下半池           栏位B=下版本前瞻(预估)
@@ -15,7 +15,7 @@
     第 6 周   (>=35d)    栏位A=下版本时间       栏位B=下版本上半池时间
 
     确定的信息直接写；推算的标「（预估）」。
-    活动制游戏（方舟）：无版本号，栏位A=当前活动，栏位B=下版本预告。
+    活动制游戏（方舟）：无版本号，栏位A=本版本活动，栏位B=限定寻访，栏位C=下版本预告。
 """
 
 from __future__ import annotations
@@ -101,7 +101,7 @@ def _half_chars_str(update: GameUpdate) -> str:
 
 
 def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = None) -> TimelineResult:
-    """根据版本更新日 + 当前日期，生成两栏位。"""
+    """根据版本更新日 + 当前日期，生成栏位。"""
     today = today or date.today()
     start_str = update.field_value("update_time") or update.field_value("display_time") or ""
     start = parse_date(start_str)
@@ -134,7 +134,15 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
     else:
         next_start = start + timedelta(days=cycle)
     preview_date = next_start - timedelta(days=pre_ahead)
-    next_num = next_version_num(update.version_num)
+
+    # 下版本已知信息（known_dates 配置或后续公告）：版本名、新角色
+    next_name_known = update.field_value("next_name")
+    next_chars_known = update.field_value("next_characters")
+    # 下版本大字：有已知版本名用版本名，否则未知
+    if next_name_known:
+        next_title = f"v{update.field_value('next_version')}「{next_name_known}」" if update.field_value("next_version") else f"「{next_name_known}」"
+    else:
+        next_title = "未知版本名"
 
     # 已知的确定信息
     has_preview = bool(update.field_value("preview_time"))
@@ -206,19 +214,22 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
             all_chars,
             estimated=preview_est,
         ))
+        next_chars = f"新角色：{next_chars_known}" if next_chars_known else ""
         slots.append(TimelineSlot(
             "下版本·更新时间",
-            f"v{next_num}",
+            next_title,
             f"{fmt_date(next_start)}" if next_known else f"约 {fmt_date(next_start)}",
+            next_chars,
             estimated=not next_known,
         ))
     else:
         # 第 6 周：下版本时间 + 下版本上半池（本版本角色仍显示）
+        next_chars = f"新角色：{next_chars_known}" if next_chars_known else ""
         slots.append(TimelineSlot(
             "下版本·更新时间",
-            f"v{next_num}",
+            next_title,
             f"{fmt_date(next_start)}" if next_known else f"约 {fmt_date(next_start)}",
-            all_chars,
+            next_chars,
             estimated=not next_known,
         ))
         slots.append(TimelineSlot(
@@ -237,9 +248,15 @@ def _activity_timeline(update: GameUpdate, cfg: GameConfig, start: date, today: 
 
     栏位A = 本版本（SideStory 名 + 起止日期 + 新干员）
     栏位B = 下版本（复刻·红丝绒，大字带复刻标记）
+    结束日优先用官方 activity_end（正文活动时间），否则周期推算。
     """
     cycle = cfg.cycle_days
-    act_end = start + timedelta(days=cycle - 1)
+    # 官方活动结束日优先（商店结束=版本结束），无则周期推算
+    official_end = parse_date(update.field_value("activity_end"))
+    if official_end:
+        act_end = official_end
+    else:
+        act_end = start + timedelta(days=cycle - 1)
     next_start = start + timedelta(days=cycle)
 
     # 角色列表
@@ -248,12 +265,16 @@ def _activity_timeline(update: GameUpdate, cfg: GameConfig, start: date, today: 
     # 复刻标记来自原始公告标题（活动名本身不含"复刻"）
     is_reprint = bool(update.field_value("is_reprint"))
 
-    # 栏位A：本版本
+    # 栏位A：本版本（版本名 + 商店结束 + 新干员及寻访结束日期）
     a_label = "本版本·复刻" if is_reprint else "本版本"
     a_chars = ""
     if char_list:
         prefix = "复刻干员：" if is_reprint else "新干员："
         a_chars = prefix + "、".join(char_list[:8])
+        # 追加寻访结束日期（官方时间）
+        banner_end = parse_date(update.field_value("banner_end"))
+        if banner_end:
+            a_chars += f"（寻访至 {fmt_date(banner_end)}）"
     slots = [TimelineSlot(
         a_label,
         update.display_title,
@@ -261,7 +282,7 @@ def _activity_timeline(update: GameUpdate, cfg: GameConfig, start: date, today: 
         a_chars,
     )]
 
-    # 栏位B：下版本（复刻标记写进大字）
+    # 栏位B：下版本（官方公布才写开启日期，否则写待公布）
     next_name = update.field_value("next_activity")
     next_is_reprint = bool(update.field_value("next_is_reprint"))
     if next_name:
@@ -269,6 +290,6 @@ def _activity_timeline(update: GameUpdate, cfg: GameConfig, start: date, today: 
         main_text = f"复刻·{next_name}" if next_is_reprint else f"「{next_name}」"
         slots.append(TimelineSlot(label, main_text, f"约 {fmt_date(next_start)} 开启", estimated=True))
     else:
-        slots.append(TimelineSlot("下版本", "待官方预告", f"约 {fmt_date(next_start)} 前后", estimated=True))
+        slots.append(TimelineSlot("下版本", "未知"))
 
-    return TimelineResult(slots=slots, note="活动制游戏：本版本来自官方公告，下版本时间为周期预估")
+    return TimelineResult(slots=slots, note="活动制游戏：本版本来自官方公告，下版本待官方预告")

@@ -1,6 +1,7 @@
 {
   "display": "绝区零",
   "short": "绝区零",
+  "aliases": ["绝区零", "zzz"],
   "theme_color": "#E0483E",
   "format": "version_based",
   "adapter": "mihoyo_json",

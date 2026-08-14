@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -26,18 +27,50 @@ for _p in (_PLUGIN_DIR, _PLUGIN_PARENT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from maibot_sdk import Command, MaiBotPlugin, Tool
+from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
+from typing import Literal
+
+
+class PluginConfig(PluginConfigBase):
+    """插件配置：WebUI 设置页模型。
+
+    tracked_games 用 Literal 生成多选框；新增游戏时在此处同步加一个 key。
+    """
+
+    __ui_label__ = "游戏更新速报设置"
+
+    tracked_games: list[Literal["wuwa", "arknights", "endfield", "zzz", "hsr"]] = Field(
+        default_factory=list,
+        description="要跟踪的游戏（留空=全部，可多选）",
+        json_schema_extra={"label": "跟踪游戏", "hint": "留空则跟踪全部游戏；新增 games/*.json 后在此处同步加选项"},
+    )
+    scheduled_enabled: bool = Field(
+        default=False,
+        description="定时推送开关",
+        json_schema_extra={"label": "定时推送", "hint": "开启后按间隔自动推送新版本信息到目标群"},
+    )
+    poll_interval_minutes: int = Field(
+        default=360,
+        description="定时轮询间隔（分钟）",
+        json_schema_extra={"label": "推送间隔", "hint": "仅定时推送开启时生效"},
+    )
+    default_groups: list[str] = Field(
+        default_factory=list,
+        description="定时推送目标 QQ 群号",
+        json_schema_extra={"label": "目标群号", "hint": "定时推送用的群号列表；Tool/指令触发不受限"},
+    )
+
 
 try:
     from core.pipeline import UpdatePipeline
-    from core.renderer import render_summary
+    from core.renderer import render_card, render_summary
     from core.store import PublishStore
     from core.timeline import build_timeline
 except ImportError:
     # 按包方式加载时的相对导入回退
     from .core.pipeline import UpdatePipeline
-    from .core.renderer import render_summary
+    from .core.renderer import render_card, render_summary
     from .core.store import PublishStore
     from .core.timeline import build_timeline
 
@@ -105,6 +138,8 @@ def _coerce_config(cfg: dict) -> dict:
 
 
 class GameUpdatePlugin(MaiBotPlugin):
+    config_model = PluginConfig
+
     # ---------- 生命周期 ----------
 
     async def on_load(self) -> None:
@@ -125,21 +160,36 @@ class GameUpdatePlugin(MaiBotPlugin):
         data_dir = self.ctx.paths.data_dir
         runtime_dir = self.ctx.paths.runtime_dir
 
-        # 读取插件配置：直接读插件目录 config.toml，不依赖 MaiBot config 能力
-        # _coerce_config 处理 configparser 回退分支的字符串类型
-        self._cfg = _coerce_config(_load_config_file(Path(__file__).resolve().parent))
+        # 读取插件配置：优先读 SDK 配置（设置页保存的值），失败回退读 config.toml
+        self._cfg = {}
+        try:
+            sdk_cfg = await self.ctx.config.get_all() or {}
+            if isinstance(sdk_cfg, dict) and sdk_cfg:
+                self._cfg = sdk_cfg
+        except Exception as e:
+            self.ctx.logger.warning("SDK 配置读取失败（%s），回退读 config.toml", e)
+        if not self._cfg:
+            self._cfg = _coerce_config(_load_config_file(Path(__file__).resolve().parent))
         # 兼容两种结构：{"plugin": {...}} 或平铺
         self._cfg_plugin = self._cfg.get("plugin", {}) if isinstance(self._cfg.get("plugin"), dict) else self._cfg
 
         self._pipeline = UpdatePipeline(logger=self.ctx.logger)
         games_dir = Path(__file__).parent / "games"
-        self._games = self._pipeline.load_games(games_dir)
+        all_games = self._pipeline.load_games(games_dir)
+
+        # tracked_games 过滤：留空=全部，非空=只跟踪列表内的游戏
+        tracked = self._cfg_plugin.get("tracked_games", []) or []
+        if tracked:
+            self._games = {k: v for k, v in all_games.items() if k in tracked}
+        else:
+            self._games = all_games
+
         self._store = PublishStore(data_dir / "published.db")
         self._pipeline.store = self._store
         self._runtime_dir = runtime_dir
 
         self.ctx.logger.info(
-            "game-update-watcher 加载完成，监控游戏: %s",
+            "game-update-watcher 加载完成，跟踪游戏: %s",
             ", ".join(c.display for c in self._games.values()),
         )
 
@@ -158,9 +208,12 @@ class GameUpdatePlugin(MaiBotPlugin):
             self._store.close()
 
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
-        # 配置热更新时重新读取文件（与 on_load 同源），保证两套入口读到同一份配置
-        del scope, config_data, version
-        self._cfg = _coerce_config(_load_config_file(Path(__file__).resolve().parent))
+        # 配置热更新：优先用 SDK 传入的新配置，失败回退读文件
+        del version
+        if isinstance(config_data, dict) and config_data:
+            self._cfg = config_data
+        else:
+            self._cfg = _coerce_config(_load_config_file(Path(__file__).resolve().parent))
         self._cfg_plugin = self._cfg.get("plugin", {}) if isinstance(self._cfg.get("plugin"), dict) else self._cfg
         self.ctx.logger.info("game-update-watcher 配置已热更新")
 
@@ -189,24 +242,53 @@ class GameUpdatePlugin(MaiBotPlugin):
         result = await self._build_and_send(stream_id)
         return {"success": result[0], "message": result[1]}
 
-    @Command("游戏速报", pattern=r"^/游戏速报")
+    @Command("游戏速报", pattern=r"^/游戏速报(?:\s+(.+))?$")
     async def handle_cmd_report(self, **kwargs) -> tuple[bool, str, int]:
         stream_id = kwargs.get("stream_id", "")
+        text = kwargs.get("text", "") or ""
         if not stream_id:
             return False, "无法获取当前聊天流", 2
-        ok, msg = await self._build_and_send(stream_id)
+        # 解析可选游戏名："/游戏速报" 全部输出，"/游戏速报 终末地" 单游戏
+        m = re.match(r"^/游戏速报(?:\s+(.+))?$", text.strip())
+        name = m.group(1).strip() if m and m.group(1) else ""
+        if name:
+            key = self._resolve_game_key(name)
+            if key is None:
+                avail = ", ".join(g.display for g in self._games.values())
+                return False, f"未找到游戏「{name}」，可用: {avail}", 2
+            ok, msg = await self._build_and_send(stream_id, keys=[key])
+            return ok, msg, 2
+        ok, msg = await self._build_and_send(stream_id, keys=None)
         return ok, msg, 2
+
+    def _resolve_game_key(self, name: str) -> str | None:
+        """按展示名/短名/别名解析游戏 key。精确匹配优先，避免子串误命中。"""
+        name = name.strip()
+        # 第一轮：精确匹配
+        for key, gc in self._games.items():
+            candidates = [gc.display, gc.key, gc.short] + list(gc.aliases)
+            if any(name == c for c in candidates if c):
+                return key
+        # 第二轮：别名包含（如"明日方舟终末地"匹配"终末地"场景，反过来）
+        for key, gc in self._games.items():
+            candidates = [gc.display, gc.key, gc.short] + list(gc.aliases)
+            if any(name in c or c in name for c in candidates if c):
+                return key
+        return None
 
     # ---------- 核心：采集 + 渲染 + 发送到指定聊天流 ----------
 
-    async def _collect_entries(self, only_new: bool, threshold: float, timeout: float) -> list[tuple]:
-        """采集所有游戏，返回 [(update, cfg, timeline)]。
+    async def _collect_entries(self, only_new: bool, threshold: float, timeout: float,
+                               keys: list[str] | None = None) -> list[tuple]:
+        """采集游戏，返回 [(update, cfg, timeline)]。
 
         only_new=True 时只保留未发布过的条目（定时推送用）；
         False 时返回全部（Tool/指令按需用）。
+        keys 为空=全部游戏，非空=只采指定游戏。
         """
+        games = {k: v for k, v in self._games.items() if not keys or k in keys}
         entries: list[tuple] = []
-        for key, gc in self._games.items():
+        for key, gc in games.items():
             try:
                 candidates = await self._pipeline.collect_game(gc, timeout)
                 updates = await self._pipeline.build_updates(gc, candidates, threshold)
@@ -219,20 +301,32 @@ class GameUpdatePlugin(MaiBotPlugin):
                 self.ctx.logger.exception("[%s] 处理失败: %s", gc.display, e)
         return entries
 
-    async def _build_and_send(self, stream_id: str) -> tuple[bool, str]:
-        """采集所有游戏 → 渲染汇总图 → 发送到指定聊天流。返回 (是否成功, 说明)。"""
+    async def _build_and_send(self, stream_id: str, keys: list[str] | None = None) -> tuple[bool, str]:
+        """采集游戏 → 渲染 → 发送到指定聊天流。返回 (是否成功, 说明)。
+
+        keys 为空=全部游戏汇总图；非空=指定游戏单图。
+        """
         cfg_plugin = self._cfg_plugin
         threshold = float(cfg_plugin.get("publish_threshold", 0.8))
         timeout = float(cfg_plugin.get("http_timeout_seconds", 15))
         watermark = "DEBUG" if cfg_plugin.get("debug", False) else ""
 
-        entries = await self._collect_entries(only_new=False, threshold=threshold, timeout=timeout)
+        entries = await self._collect_entries(only_new=False, threshold=threshold, timeout=timeout, keys=keys)
 
         if not entries:
             return False, "采集失败或没有可用数据"
 
         try:
-            png = render_summary(entries, self._runtime_dir / "summary.png", watermark)
+            if keys and len(keys) == 1:
+                # 单游戏：若多条用单游戏汇总图，单条用单卡
+                if len(entries) == 1:
+                    up, gc, tl = entries[0]
+                    png = render_card(up, gc, tl, self._runtime_dir / f"{gc.key}_info.png", watermark)
+                else:
+                    png = render_summary(entries, self._runtime_dir / f"{keys[0]}_info.png", watermark)
+            else:
+                # 全部游戏：汇总长图
+                png = render_summary(entries, self._runtime_dir / "summary.png", watermark)
             b64 = self._pipeline.encode_image(png)
             ok = await self.ctx.send.image(image_data=b64, stream_id=stream_id)
             if ok:

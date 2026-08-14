@@ -36,7 +36,8 @@ class KuroJsonAdapter(BaseAdapter):
 
             # 标题提取策略：
             # 1. 优先取含「」和版本关键词的行（如「遗音扶剑，荡梦而歌」3.5版本内容介绍如下）
-            # 2. 其次取第一行非客套话的行
+            # 2. 其次取以「」开头且像标题的行（如「xxx」维护预告）
+            # 3. 拒绝把正文句子当标题（如 "近期由于平台调整..."）
             title = ""
             for line in content_text.split("\n"):
                 line = line.strip()
@@ -50,12 +51,11 @@ class KuroJsonAdapter(BaseAdapter):
                     line = line.strip()
                     if not line:
                         continue
-                    if any(k in line for k in ("亲爱的", "感谢", "还请", "查阅", "敬请")):
-                        continue
-                    title = line
-                    break
+                    if line.startswith("「") and not any(k in line for k in ("亲爱的", "感谢", "还请", "查阅", "敬请")):
+                        title = line
+                        break
             if not title:
-                title = p.get("title_override") or (content_text[:40] + "…")
+                title = p.get("title_override") or ""
             # 截断过长的标题行
             if len(title) > 60:
                 title = title[:60] + "…"

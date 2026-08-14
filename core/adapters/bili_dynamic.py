@@ -36,7 +36,8 @@ _MIXIN_KEY_ENC_TAB = [
 _NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
 _DYNAMIC_URL = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
 
-# 结果缓存：官方动态不是高频变化，缓存避免 5 个游戏连发请求触发 B站风控
+# 结果缓存：官方动态变化不频繁，缓存可减少请求次数、避免触发 B站风控
+# 模块级全局状态：同一进程内所有实例共享，节省重复请求
 _CACHE_TTL_SECONDS = 900  # 15 分钟
 _cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 

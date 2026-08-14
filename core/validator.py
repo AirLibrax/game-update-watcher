@@ -144,8 +144,17 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
             if name:
                 out.append(FieldClaim("version_name", name.strip(), "parse", 1.0, source_url))
                 got_name = True
-        # 活动时间："活动时间：08月01日 12:00 - 08月29日 03:59" → 提取起始日
-        m_at = re.search(r"活动时间[：:]\s*(\d{1,2})月(\d{1,2})日", content)
+        # 活动/关卡时间："开放时间：08月01日 12:00 - 08月22日 03:59"（关卡）或
+        # "活动时间：08月01日 12:00 - 08月29日 03:59"（含商店）
+        # 版本结束以关卡时间为准：优先"开放时间"，没有才用"活动时间"
+        m_at = None
+        for kw in ("开放时间", "活动时间"):
+            m_at = re.search(
+                rf"{kw}[：:]\s*(\d{{1,2}})月(\d{{1,2}})日[^\n]*?[-—~～]\s*(\d{{1,2}})月(\d{{1,2}})日",
+                content,
+            )
+            if m_at:
+                break
         if m_at:
             # 年份取当前年（公告通常年内活动）
             year = datetime.now().year
@@ -154,12 +163,35 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
                 f"{year}-{int(m_at.group(1)):02d}-{int(m_at.group(2)):02d}",
                 "parse", 1.0, source_url,
             ))
+            out.append(FieldClaim(
+                "activity_end",
+                f"{year}-{int(m_at.group(3)):02d}-{int(m_at.group(4)):02d}",
+                "parse", 1.0, source_url,
+            ))
         else:
             # 正文没有活动时间，用公告发布日期兜底（displayTime）
             for c in claims:
                 if c.field == "display_time" and c.value:
                     out.append(FieldClaim("update_time", c.value, "parse", 1.0, source_url))
                     break
+        # 限定寻访时间："二、「夏日嘉年华」，【车辙与风的归所】限定寻访开启" 后跟 "活动时间：08月01日 - 08月15日"
+        # 中间可能跨行（开启 在上一行，活动时间 在下一行）
+        m_banner = re.search(r"【([^】]+)】限定寻访.*?活动时间[：:]\s*(\d{1,2})月(\d{1,2})日.*?[-—~～]\s*(\d{1,2})月(\d{1,2})日", content, re.S)
+        if m_banner:
+            year = datetime.now().year
+            out.append(FieldClaim(
+                "banner_name", m_banner.group(1).strip(), "parse", 1.0, source_url,
+            ))
+            out.append(FieldClaim(
+                "banner_start",
+                f"{year}-{int(m_banner.group(2)):02d}-{int(m_banner.group(3)):02d}",
+                "parse", 1.0, source_url,
+            ))
+            out.append(FieldClaim(
+                "banner_end",
+                f"{year}-{int(m_banner.group(4)):02d}-{int(m_banner.group(5)):02d}",
+                "parse", 1.0, source_url,
+            ))
     if vp:
         m = re.search(vp, title)
         if m:
@@ -226,7 +258,7 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
             return out
 
         # 锚定"新干员"段：找到"新干员"或"新增干员"字样后，提取其后的全部星级行
-        # 注意：6★ 和 5★ 行要混在一起匹配，不能用 (6★+)|(5★+) 交替（会只取其中一种）
+        # 6★ 和 5★ 行混在一起匹配（同一字符类），保证两种星级都被提取
         m_new = re.search(
             r"(?:新干员登场|新增干员)[^★]{0,80}?((?:(?:★{6}|★{5})[：:][^★\n】]+\s*\n?\s*)+)",
             content,

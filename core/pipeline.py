@@ -90,7 +90,7 @@ class UpdatePipeline:
         for item in candidates:
             claims = extract_fields(item, cfg)
             # 卡池公告（无版本名，只有 half_start）：不进卡片列表，仅收集时间
-            # 注意：终末地的版本更新说明也含 half_start，但它是主条目，不能跳过
+            # 终末地的版本更新说明也含 half_start，但它本身是主条目，不能按卡池公告跳过
             has_name = any(c.field == "version_name" and c.value for c in claims)
             hs = [c.value for c in claims if c.field == "half_start" and c.value]
             if hs and not has_name:
@@ -181,11 +181,15 @@ class UpdatePipeline:
             updates.sort(key=_priority)
             main = updates[0]
 
+            # 当前活动开始日（用于过滤历史复刻预告）
+            start_date_str = main.field_value("update_time") or ""
+
             # 复刻标记：只看主活动自身的原始标题（候选里可能有下版本复刻预告，不能误伤当前版本）
             if "复刻" in main.raw_title:
                 main.fields["is_reprint"] = FieldVerdict(field="is_reprint", value="1", confidence=1.0, sources=["parse"])
 
             # 下版本预告：找标题含"复刻"且非时装/皮肤/周边类的公告
+            # 关键：只接受发布时间晚于当前活动开始日的公告（bulletinList 返回全量历史，需过滤过期预告）
             next_name = ""
             next_is_reprint = False
             for it in candidates:
@@ -193,6 +197,10 @@ class UpdatePipeline:
                 if any(k in rt for k in ("时装", "皮肤", "周边", "模组")):
                     continue
                 if "复刻" in rt and "即将开启" in rt:
+                    # 时间过滤：公告 displayTime 必须 >= 当前活动开始日，否则是历史复刻预告
+                    claim_dt = next((c.value for c in it.get("claims", []) if c.field == "display_time" and c.value), "")
+                    if claim_dt and claim_dt < start_date_str:
+                        continue
                     m = re.search(r"[【\[]([^】\]]+)[】\]]", rt)
                     if m:
                         next_name = m.group(1).strip()
@@ -238,14 +246,15 @@ class UpdatePipeline:
         for c in claims:
             if c.field == "version_name" and c.value:
                 candidate = c.value.strip()
-                # 清洗：排除含换行/过长/含正文特征词的乱文
+                # 清洗：剥离 #话题# 前缀（B站动态标题常见），再判断是否乱文
+                cleaned = re.sub(r"#\S+?#", "", candidate).strip()
                 if (
-                    "\n" in candidate
-                    or len(candidate) > 20
-                    or any(k in candidate for k in ("亲爱的", "开拓者", "管理员", "博士", "漂泊者", "大家好", "欢迎"))
+                    "\n" in cleaned
+                    or len(cleaned) > 20
+                    or any(k in cleaned for k in ("亲爱的", "开拓者", "管理员", "博士", "漂泊者", "大家好", "欢迎"))
                 ):
                     continue
-                name = candidate
+                name = cleaned
                 break
         ver = ""
         m = re.search(r"(\d+\.\d+)\s*版本", item.get("raw_title", ""))

@@ -1,6 +1,7 @@
 {
   "display": "明日方舟：终末地",
   "short": "终末地",
+  "aliases": ["终末地", "明日方舟终末地"],
   "theme_color": "#2F6F4F",
   "format": "version_based",
   "adapter": "hg_ssr",
