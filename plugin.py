@@ -28,8 +28,6 @@ for _p in (_PLUGIN_DIR, _PLUGIN_PARENT):
         sys.path.insert(0, str(_p))
 
 from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
-
-
 from typing import Literal
 
 
