@@ -129,15 +129,19 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
 
     # 下版本更新时刻：优先用官方 end_time（米哈游 end_time=版本结束=下版本更新），否则周期推算
     next_known = parse_date(update.field_value("next_update_time"))
-    if next_known:
-        next_start = next_known
-    else:
-        next_start = start + timedelta(days=cycle)
+    if next_known and next_known <= start:
+        # 过期防御：下版本时间不晚于本版本开始日，多为 known_dates 未随版本推进清理，视为未知
+        next_known = None
+    next_start = next_known or (start + timedelta(days=cycle))
     preview_date = next_start - timedelta(days=pre_ahead)
 
     # 下版本已知信息（known_dates 配置或后续公告）：版本名、新角色
     next_name_known = update.field_value("next_name")
     next_chars_known = update.field_value("next_characters")
+    # 过期防御：next_version 等于当前版本号说明 known_dates 未随版本推进清理，忽略
+    if update.version_num and update.field_value("next_version") == update.version_num:
+        next_name_known = ""
+        next_chars_known = ""
     # 下版本大字：有已知版本名用版本名，否则未知
     if next_name_known:
         next_title = f"v{update.field_value('next_version')}「{next_name_known}」" if update.field_value("next_version") else f"「{next_name_known}」"

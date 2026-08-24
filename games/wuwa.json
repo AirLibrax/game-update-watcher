@@ -22,12 +22,6 @@
   "cycle_days": 35,
   "half_days": 18,
   "preview_ahead_days": 7,
-  "known_dates": {
-    "preview_time": "2026-08-07 19:00",
-    "next_update_time": "2026-08-20",
-    "next_version": "3.6",
-    "next_name": "蜃云灯影，凡尘剑心",
-    "next_characters": "清宵,景燃"
-  },
+  "known_dates": {},
   "groups": []
 }
