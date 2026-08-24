@@ -28,7 +28,8 @@ for _p in (_PLUGIN_DIR, _PLUGIN_PARENT):
         sys.path.insert(0, str(_p))
 
 from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
-from maibot_sdk.types import ToolParameterInfo, ToolParamType
+
+
 from typing import Literal
 
 
@@ -225,21 +226,14 @@ class GameUpdatePlugin(MaiBotPlugin):
         description=(
             "生成并发送「游戏更新速报」汇总图（包含鸣潮/明日方舟/绝区零/崩铁等游戏的版本节奏、卡池、前瞻时间）。"
             "当用户询问游戏版本更新、卡池时间、前瞻直播、新角色等消息时调用。"
-            "会采集各游戏官方公告，生成一张汇总图片并发送到当前聊天流。\n"
-            "参数说明：\n"
-            "- stream_id：string，必填。当前聊天流 ID，由系统注入。"
+            "会采集各游戏官方公告，生成一张汇总图片并发送到当前聊天流。"
         ),
-        parameters=[
-            ToolParameterInfo(
-                name="stream_id",
-                param_type=ToolParamType.STRING,
-                description="当前聊天流 ID",
-                required=True,
-            ),
-        ],
     )
-    async def handle_tool_report(self, stream_id: str, **kwargs) -> dict:
-        del kwargs
+    async def handle_tool_report(self, stream_id: str = "", **kwargs) -> dict:
+        # stream_id 不声明为 LLM 参数：由 Host 注入权威值，避免 LLM 填错发送目标
+        stream_id = (stream_id or str(kwargs.get("stream_id") or "")).strip()
+        if not stream_id:
+            return {"success": False, "message": "无法获取当前聊天流 ID"}
         result = await self._build_and_send(stream_id)
         return {"success": result[0], "message": result[1]}
 
