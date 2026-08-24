@@ -160,14 +160,15 @@ class GameUpdatePlugin(MaiBotPlugin):
         data_dir = self.ctx.paths.data_dir
         runtime_dir = self.ctx.paths.runtime_dir
 
-        # 读取插件配置：优先读 SDK 配置（设置页保存的值），失败回退读 config.toml
+        # 读取插件配置：优先用 Runner 注入的原始配置（与 config_model 一致，不走 RPC），
+        # 失败回退读 config.toml 文件
         self._cfg = {}
         try:
-            sdk_cfg = await self.ctx.config.get_all() or {}
+            sdk_cfg = self.get_plugin_config_data()
             if isinstance(sdk_cfg, dict) and sdk_cfg:
                 self._cfg = sdk_cfg
         except Exception as e:
-            self.ctx.logger.warning("SDK 配置读取失败（%s），回退读 config.toml", e)
+            self.ctx.logger.warning("Runner 配置读取失败（%s），回退读 config.toml", e)
         if not self._cfg:
             self._cfg = _coerce_config(_load_config_file(Path(__file__).resolve().parent))
         # 兼容两种结构：{"plugin": {...}} 或平铺
@@ -221,8 +222,8 @@ class GameUpdatePlugin(MaiBotPlugin):
 
     @Tool(
         "game_update_report",
-        brief_description="生成并发送「游戏更新速报」汇总图（包含鸣潮/明日方舟/绝区零/崩铁等游戏的版本节奏、卡池、前瞻时间）",
-        detailed_description=(
+        description=(
+            "生成并发送「游戏更新速报」汇总图（包含鸣潮/明日方舟/绝区零/崩铁等游戏的版本节奏、卡池、前瞻时间）。"
             "当用户询问游戏版本更新、卡池时间、前瞻直播、新角色等消息时调用。"
             "会采集各游戏官方公告，生成一张汇总图片并发送到当前聊天流。\n"
             "参数说明：\n"
