@@ -98,6 +98,10 @@ def _fmt_block(fmt: dict, key: str, default):
 
 # ---------- 区块绘制 ----------
 
+# 信息来源小标（P1-3）：official=官方公告 / preview=官方预告 / estimate=周期推算
+_SOURCE_TAGS = {"official": "官方", "preview": "预告", "estimate": "推算"}
+
+
 def _draw_slot_card(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
                     slot, accent_rgb: tuple[int, int, int],
                     content_x: int, content_w: int, fmt: dict) -> None:
@@ -111,14 +115,21 @@ def _draw_slot_card(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
     if card.get("accent_bar", True):
         draw.rounded_rectangle([x, y + 24, x + 5, y + h - 24], radius=2, fill=accent_rgb)
 
-    # 行1：标签（左）+ 日期（右，右上角）
+    # 行1：标签（左）+ 日期（右，右上角）+ 来源小标（日期左侧，小号弱化色）
     label_font = _load_font(_fmt_slot(fmt, "label_font", 28))
     draw.text((content_x, y + 18), slot.label, font=label_font, fill="#8A93A6")
     if slot.date:
         date_color = "#F5C25A" if slot.estimated else "#C9D1DE"
-        date_text = slot.date + ("（预估）" if slot.estimated else "")
-        draw.text((x + w - 28 - draw.textlength(date_text, font=label_font), y + 18),
-                  date_text, font=label_font, fill=date_color)
+        date_text = slot.date  # 预估不再追加"（预估）"后缀，改由左侧来源小标表达
+        tag = _SOURCE_TAGS.get(slot.source, "")
+        tag_font = _load_font(22)
+        right = x + w - 28
+        date_w = draw.textlength(date_text, font=label_font)
+        if tag:
+            tag_color = "#F5C25A" if slot.estimated else "#5B6472"
+            tag_w = draw.textlength(tag, font=tag_font)
+            draw.text((right - tag_w - 10 - date_w, y + 23), tag, font=tag_font, fill=tag_color)
+        draw.text((right - date_w, y + 18), date_text, font=label_font, fill=date_color)
 
     # 行2：大字内容
     main_font = _load_font(_fmt_slot(fmt, "main_font", 38))
@@ -216,10 +227,11 @@ def render_card(update: GameUpdate, cfg: GameConfig, timeline: TimelineResult, o
 # ---------- 多游戏汇总长图 ----------
 
 def render_summary(entries: list[tuple[GameUpdate, GameConfig, TimelineResult]],
-                   out_path: Path, watermark: str = "") -> Path:
+                   out_path: Path, watermark: str = "", status_line: str = "") -> Path:
     """渲染多游戏汇总长图：每款游戏一个区块纵向排布，一次发送。
 
     entries: [(update, cfg, timeline), ...] 按展示顺序
+    status_line: 数据源状态行（P1-3），画在底部注释上方，空则不画。
     区块结构完全由各游戏的 format 模板驱动，新增游戏无需改代码。
     """
     PAD2 = PAD
@@ -228,7 +240,7 @@ def render_summary(entries: list[tuple[GameUpdate, GameConfig, TimelineResult]],
     content_w = inner_w - 56
 
     title_h = 120            # 顶部总标题区
-    footer_h = 90
+    footer_h = 120 if status_line else 90
 
     # 先计算总高度（每个游戏用自己的 format 参数）
     body_h = 0
@@ -268,6 +280,9 @@ def render_summary(entries: list[tuple[GameUpdate, GameConfig, TimelineResult]],
 
     # 底部注释
     footer_y = H - PAD2 - 34
+    if status_line:
+        draw.text((PAD2, footer_y - 34), _fit_text(draw, status_line, _load_font(24), inner_w - 60),
+                  font=_load_font(24), fill="#5B6472")
     note = "确定信息来自官方公告，预估为周期推算"
     draw.text((PAD2, footer_y), _fit_text(draw, note, _load_font(24), inner_w - 260),
               font=_load_font(24), fill="#5B6472")

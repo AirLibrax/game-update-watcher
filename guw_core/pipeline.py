@@ -15,7 +15,7 @@ from typing import Any
 from guw_core.adapters import create_adapter
 from guw_core.models import FieldVerdict, GameConfig, GameUpdate
 from guw_core.store import PublishStore
-from guw_core.validator import aggregate, extract_fields, extract_preview_claims
+from guw_core.validator import aggregate, extract_fields, extract_preview_claims, extract_roadmap_nodes
 
 
 def _to_date(s: str) -> date | None:
@@ -32,6 +32,8 @@ class UpdatePipeline:
     def __init__(self, logger=None, store: PublishStore | None = None):
         self.logger = logger
         self.store = store
+        # 数据源状态（P1-3）：game_key -> {"main": ok|empty|fail, "bili": ok|empty|fail|None}
+        self.collect_status: dict[str, dict[str, str | None]] = {}
 
     def _log(self, msg: str) -> None:
         if self.logger:
@@ -73,22 +75,32 @@ class UpdatePipeline:
 
         额外源（如 B站动态）的条目会作为同字段的第二声明，
         aggregate 据此做字段级交叉认证（多源一致 → 置信度提升）。
+        数据源状态写入 self.collect_status[game_key]（P1-3 可观测性）。
         """
         items: list[dict[str, Any]] = []
+        status: dict[str, str | None] = {"main": "fail", "bili": None}
         # 主源
         adapter = create_adapter(cfg.adapter, {**cfg.adapter_params, "timeout": timeout}, self.logger)
         try:
-            items.extend(await adapter.collect())
+            got = await adapter.collect()
+            items.extend(got)
+            status["main"] = "ok" if got else "empty"
         except Exception as e:
             self._log(f"[{cfg.display}] 主源 {cfg.adapter} 采集失败: {e}")
-        # 额外认证源
+        # 额外认证源（每源独立容错：一个账号风控不拖累其他游戏/其他源）
         for src in cfg.extra_sources:
             try:
                 extra = create_adapter(src["adapter"], {**src.get("params", {}), "timeout": timeout}, self.logger)
-                items.extend(await extra.collect())
+                got = await extra.collect()
+                items.extend(got)
+                if "bili" in src.get("adapter", ""):
+                    status["bili"] = "ok" if got else "empty"  # empty=风控/无内容，静默降级
             except Exception as e:
                 self._log(f"[{cfg.display}] 认证源 {src.get('adapter')} 采集失败: {e}")
+                if "bili" in src.get("adapter", ""):
+                    status["bili"] = "fail"
 
+        self.collect_status[cfg.key] = status
         cands = [it for it in items if self._match_rules(it.get("raw_title", ""), cfg)]
         self._log(f"[{cfg.display}] 采集 {len(items)} 条（主源+认证源），命中规则 {len(cands)} 条")
         return cands
@@ -107,6 +119,7 @@ class UpdatePipeline:
         auth_items: list[dict[str, Any]] = []      # 认证源原始条目
         preview_items: list[dict[str, Any]] = []   # 预告类原始条目（preview_sources 命中）
         half_starts: list[str] = []                # 卡池公告提供的官方下半池时间
+        today_s = datetime.now().strftime("%Y-%m-%d")
 
         for item in candidates:
             claims = extract_fields(item, cfg)
@@ -155,7 +168,6 @@ class UpdatePipeline:
         # 版本制：新旧版本更新说明并存时只保留"最新已开始"的主条目（防汇总图同一游戏双块）
         # 例：崩铁 4.5 上线后，4.4 与 4.5 更新说明同时在候选池 → 取 update_time 最新且 ≤ today 者
         if updates and not cfg.activity_mode and len(updates) > 1:
-            today_s = datetime.now().strftime("%Y-%m-%d")
             started = [u for u in updates if (u.field_value("update_time") or "")[:10] <= today_s]
             if started:
                 updates = [max(started, key=lambda u: u.field_value("update_time"))]
@@ -215,11 +227,22 @@ class UpdatePipeline:
         # 预告类公告（preview_sources，如终末地研发通讯/B站活动说明/干员演示动态）→ next_* 注入主条目
         # 角色类字段多条目累加合并（去重保序）；单值字段首项优先；已有官方/known 值不覆盖；
         # 下半池（next_half_characters）角色不进上半名单（含 known_dates 兜底值，防重复展示）
+        # H1 守卫：预告信息不得自指当前版本（版本切换后研发通讯等仍在候选池 → next_name==当前版本名 跳过）、
+        #          next_update_time 必须晚于当前版本开始且在未来（防 B站旧动态日期回灌）
         if preview_items and updates:
             main_upd = updates[0]
             main_start = _to_date(main_upd.field_value("update_time")) or date.today()
+            main_start_s = main_start.isoformat()
             for pit in preview_items:
                 for claim in extract_preview_claims(pit, cfg, main_start):
+                    if claim.field == "next_name" and claim.value == main_upd.version_name:
+                        continue
+                    if claim.field == "next_version" and main_upd.version_num and claim.value == main_upd.version_num:
+                        continue
+                    if claim.field == "next_update_time":
+                        d = claim.value[:10]
+                        if not d or d <= main_start_s or d <= today_s:
+                            continue
                     cur = main_upd.fields.get(claim.field)
                     if claim.field in ("next_characters", "next_half_characters"):
                         half_set = {n.strip() for n in main_upd.field_value("next_half_characters").split(",") if n.strip()}
@@ -237,133 +260,117 @@ class UpdatePipeline:
                             field=claim.field, value=claim.value, confidence=1.0, sources=["parse"]
                         )
 
-        if cfg.activity_mode and updates:
-            # 活动制（方舟）：事件模型 —— 从候选里选出主活动。
-            # 主事件 = 进行中的活动中最新开始的（预告升格：预告公告的活动开始日 ≤ today 即升格为主，
-            # 解决"酸橙已结束仍占位、墟进行中却被当预告"的问题）；
-            # 无进行中活动时退回旧优先级逻辑（SideStory/嘉年华/活动 优先）。
-            def _priority(u: GameUpdate) -> tuple[int, int]:
-                # 用原始标题判断（提取后的 SideStory 名可能不含"嘉年华"等关键词）
+            # 后处理：上半名单剔除已归入下半池的角色。
+            # known_dates 兑底值走聚合通道（高权重）不经过上方注入过滤，
+            # 可能与自动提取的 next_half_characters 重叠（如同角色同时出现在新角色与下半池）。
+            _half_v = main_upd.field_value("next_half_characters")
+            _up_field = main_upd.fields.get("next_characters")
+            if _half_v and _up_field:
+                _half_set = {n.strip() for n in _half_v.split(",") if n.strip()}
+                _names = [n.strip() for n in _up_field.value.split(",") if n.strip()]
+                _filtered = [n for n in _names if n not in _half_set]
+                if _filtered != _names and _filtered:
+                    main_upd.fields["next_characters"] = FieldVerdict(
+                        field="next_characters", value=",".join(_filtered),
+                        confidence=_up_field.confidence, sources=_up_field.sources,
+                    )
+
+        if cfg.activity_mode:
+            # ===== P1-1 方舟事件列表状态机（proposal 第四节）=====
+            # Event = {name, kind: main|reprint|banner|roadmap, start, end, rough}
+            # 状态：active = start ≤ today ≤ end；upcoming = today < start；ended = today > end
+            # 主事件 = 进行中（main/reprint）中 start 最新；无则最近 upcoming；再无可显示 → 空窗占位
+            # roadmap（制作组通讯）节点带粗窗口字符串（"9月上旬"），不假装精确日期
+            events: list[dict] = []
+
+            # 1) 公告事件：来自候选 updates（制作组通讯走 roadmap，不入公告事件）
+            for u in updates:
                 rt = u.raw_title
-                if any(k in rt for k in ("SideStory", "嘉年华", "活动")):
-                    return (0, -len(u.field_value("characters")))
-                return (1, -len(u.field_value("characters")))
-
-            def _active(u: GameUpdate) -> bool:
-                s = _to_date(u.field_value("update_time"))
-                e = _to_date(u.field_value("activity_end"))
-                return bool(s and e and s <= date.today() <= e)
-
-            active = [u for u in updates if _active(u)]
-            if active:
-                main = max(active, key=lambda u: u.field_value("update_time"))
-            else:
-                main = sorted(updates, key=_priority)[0]
-
-            # 当前活动开始日（用于过滤历史复刻预告）
-            start_date_str = main.field_value("update_time") or ""
-
-            # 复刻标记：只看主活动自身的原始标题（候选里可能有下版本复刻预告，不能误伤当前版本）
-            if "复刻" in main.raw_title:
-                main.fields["is_reprint"] = FieldVerdict(field="is_reprint", value="1", confidence=1.0, sources=["parse"])
-
-            # 下版本预告：找标题含"复刻"且非时装/皮肤/周边类的公告
-            # 关键：只接受发布时间晚于当前活动开始日的公告（bulletinList 返回全量历史，需过滤过期预告）
-            next_name = ""
-            next_is_reprint = False
-            next_activity_start = ""
-            next_activity_end = ""
-            for it in candidates:
-                rt = it.get("raw_title", "")
+                if "制作组通讯" in rt:
+                    continue
                 if any(k in rt for k in ("时装", "皮肤", "周边", "模组")):
                     continue
-                if "复刻" in rt and "即将开启" in rt:
-                    # 时间过滤：公告 displayTime 必须 >= 当前活动开始日，否则是历史复刻预告
-                    claim_dt = next((c.value for c in it.get("claims", []) if c.field == "display_time" and c.value), "")
-                    if claim_dt and claim_dt < start_date_str:
-                        continue
-                    m = re.search(r"[【\[]([^】\]]+)[】\]]", rt)
-                    if m:
-                        next_name = m.group(1).strip()
-                    else:
-                        next_name = rt.replace("复刻", "").replace("即将开启", "").strip()
-                    next_is_reprint = True
-                    # 预告正文活动时间 → 官方下版本起止（validator 对"即将开启"类公告已映射 next_activity_*）
-                    pre_claims = extract_fields(it, cfg)
-                    next_activity_start = next((c.value for c in pre_claims if c.field == "next_activity_start" and c.value), "")
-                    next_activity_end = next((c.value for c in pre_claims if c.field == "next_activity_end" and c.value), "")
-                    break
-            if next_name:
-                main.fields["next_activity"] = FieldVerdict(
-                    field="next_activity", value=next_name, confidence=1.0, sources=["parse"]
-                )
-                main.fields["next_is_reprint"] = FieldVerdict(
-                    field="next_is_reprint", value="1" if next_is_reprint else "0", confidence=1.0, sources=["parse"]
-                )
-                if next_activity_start:
-                    main.fields["next_activity_start"] = FieldVerdict(
-                        field="next_activity_start", value=next_activity_start, confidence=1.0, sources=["parse"]
-                    )
-                if next_activity_end:
-                    main.fields["next_activity_end"] = FieldVerdict(
-                        field="next_activity_end", value=next_activity_end, confidence=1.0, sources=["parse"]
-                    )
+                if "复刻" in rt:
+                    kind = "reprint"
+                elif re.search(r"寻访|甄选", rt):
+                    kind = "banner"
+                else:
+                    kind = "main"
+                if kind == "banner":
+                    s = _to_date(u.field_value("banner_start")) or _to_date(u.field_value("update_time"))
+                    e = _to_date(u.field_value("banner_end"))
+                    ev_name = u.field_value("banner_name") or u.version_name
+                else:
+                    s = _to_date(u.field_value("update_time"))
+                    e = _to_date(u.field_value("activity_end"))
+                    ev_name = u.version_name
+                events.append({
+                    "name": ev_name, "kind": kind,
+                    "start": s.isoformat() if s else "",
+                    "end": e.isoformat() if e else "",
+                })
 
-            # 角色：只保留主活动自身的（历史活动/下版本预告的角色不得混入当期）
-            merged: list[str] = []
-            for nm in [x.strip() for x in main.field_value("characters").split(",") if x.strip()]:
-                if nm and nm not in merged:
-                    merged.append(nm)
-            if merged:
-                main.fields["characters"] = FieldVerdict(
-                    field="characters", value=",".join(merged), confidence=1.0, sources=["parse"]
+            # 2) roadmap 节点：制作组通讯正文 "SideStory「月行水上」限时活动将于9月上旬开启"
+            for it in candidates:
+                if "制作组通讯" not in it.get("raw_title", ""):
+                    continue
+                for c in extract_roadmap_nodes(it):
+                    name, window = c.value.split("|", 1)
+                    events.append({"name": name, "kind": "roadmap", "start": "", "end": "", "rough": window})
+
+            # 3) 主事件选择
+            main_events = [ev for ev in events if ev["kind"] in ("main", "reprint")]
+            actives = [ev for ev in main_events if ev["start"] and ev["end"] and ev["start"] <= today_s <= ev["end"]]
+            if actives:
+                main_ev = max(actives, key=lambda ev: ev["start"])
+            else:
+                upcomings = [ev for ev in main_events if ev["start"] and ev["start"] > today_s]
+                main_ev = min(upcomings, key=lambda ev: ev["start"]) if upcomings else None
+
+            # 4) 主条目输出：主事件对应 update；无主事件 → 空窗占位条目（仍输出卡片，显示"暂无活动"）
+            if main_ev is not None:
+                main = next(
+                    (u for u in updates if u.version_name == main_ev["name"] and "制作组通讯" not in u.raw_title),
+                    None,
+                )
+            else:
+                main = None
+            if main is None:
+                main = GameUpdate(
+                    game=cfg.key, game_display=cfg.display, version_num=None,
+                    version_name="暂无进行中活动",
+                    fields={},
+                    raw_urls=[], raw_title="",
+                    collected_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
                 )
 
-            # 当期寻访池：主活动未带 banner 信息时（如复刻主公告无寻访段），
-            # 从候选里聚合"寻访/甄选"类公告（图片正文时池名仍在标题/首行：
-            # '中坚甄选 限时寻访开启' / '【联合行动】定向寻访开启'；
-            # 官方活动时间可能由 B站动态文本补充，如 '中坚甄选开启\n活动时间：08月20日 04:00 - 09月03日 03:59'）
-            if not main.field_value("banner_name"):
-                main_urls = set(main.raw_urls)
-                for it in candidates:
-                    rt = it.get("raw_title", "")
-                    if not re.search(r"寻访|甄选", rt):
-                        continue
-                    if any(k in rt for k in ("时装", "皮肤", "周边", "模组", "常驻标准", "出率")):
-                        continue
-                    if it.get("url", "") in main_urls:
-                        continue  # 主活动自身（其正文寻访段已由 m_banner 提取）
-                    pre_claims = extract_fields(it, cfg)
-                    bn = next((c.value for c in pre_claims if c.field == "banner_name" and c.value), "")
-                    if not bn:
-                        continue
-                    # 池名注入（仅首次）；时间缺失时继续遍历候选补齐（B站动态可能带官方活动时间）
-                    if not main.field_value("banner_name"):
-                        main.fields["banner_name"] = FieldVerdict(
-                            field="banner_name", value=bn, confidence=1.0, sources=["parse"]
-                        )
-                    bs = next((c.value for c in pre_claims if c.field == "banner_start" and c.value), "")
-                    be = next((c.value for c in pre_claims if c.field == "banner_end" and c.value), "")
-                    if bs and not main.field_value("banner_start"):
+            # 5) 事件列表落字段（timeline 渲染驱动）
+            main.fields["events"] = FieldVerdict(
+                field="events", value=json.dumps(events, ensure_ascii=False),
+                confidence=1.0, sources=["parse"],
+            )
+            if main_ev is not None:
+                main.fields["event_kind"] = FieldVerdict(
+                    field="event_kind", value=main_ev["kind"], confidence=1.0, sources=["parse"]
+                )
+                # 复刻标记（驱动栏位A标签与干员前缀）
+                if main_ev["kind"] == "reprint":
+                    main.fields["is_reprint"] = FieldVerdict(field="is_reprint", value="1", confidence=1.0, sources=["parse"])
+                # 当期寻访池信息：banner 事件（池名必有；时间可有可无，图片正文公告可能只有池名）
+                banner_evs = [ev for ev in events if ev["kind"] == "banner"]
+                if banner_evs and not main.field_value("banner_name"):
+                    b = banner_evs[0]
+                    main.fields["banner_name"] = FieldVerdict(
+                        field="banner_name", value=b["name"], confidence=1.0, sources=["parse"]
+                    )
+                    if b["start"]:
                         main.fields["banner_start"] = FieldVerdict(
-                            field="banner_start", value=bs, confidence=1.0, sources=["parse"]
+                            field="banner_start", value=b["start"], confidence=1.0, sources=["parse"]
                         )
-                    if be and not main.field_value("banner_end"):
+                    if b["end"]:
                         main.fields["banner_end"] = FieldVerdict(
-                            field="banner_end", value=be, confidence=1.0, sources=["parse"]
+                            field="banner_end", value=b["end"], confidence=1.0, sources=["parse"]
                         )
-                    # 寻访公告带干员列表时并入当期（图片正文通常没有，留扩展位）
-                    bc = next((c.value for c in pre_claims if c.field == "characters" and c.value), "")
-                    if bc:
-                        all_names = [x.strip() for x in main.field_value("characters").split(",") if x.strip()]
-                        for nm in [x.strip() for x in bc.split(",") if x.strip()]:
-                            if nm and nm not in all_names:
-                                all_names.append(nm)
-                        main.fields["characters"] = FieldVerdict(
-                            field="characters", value=",".join(all_names), confidence=1.0, sources=["parse"]
-                        )
-                    if main.field_value("banner_name") and main.field_value("banner_end"):
-                        break  # 池名+官方时间齐了才停
             updates = [main]
         return updates
 

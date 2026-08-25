@@ -25,7 +25,11 @@ class HgJsonAdapter(BaseAdapter):
             raise RuntimeError(f"方舟 bulletinList code={data.get('code')} msg={data.get('msg')}")
 
         items: list[dict[str, Any]] = []
-        for item in data["data"]["list"]:
+        # H2 修复：只对最新 detail_limit 条（或标题含活动/寻访关键词者）拉详情，
+        # 避免每轮对全量 24 条发详情请求（旧实现 25 请求/轮）。
+        # 关键词强制兜底：核心公告（复刻预告/制作组通讯/活动开启）即使超出 limit 也必拉详情
+        detail_limit = int(p.get("detail_limit", 5))
+        for i, item in enumerate(data["data"]["list"]):
             cid = str(item["cid"])
             detail_url = f"{p['api_base']}/api/game/bulletin/{cid}"
             # 方舟 API 标题里的 \n 是字面反斜杠+n（非真实换行）
@@ -35,12 +39,16 @@ class HgJsonAdapter(BaseAdapter):
                 FieldClaim(field="display_time", value=item.get("displayTime", ""), source=self.SOURCE_ID, weight=self.WEIGHT, url=detail_url),
                 FieldClaim(field="category", value=str(item.get("category", "")), source=self.SOURCE_ID, weight=self.WEIGHT, url=detail_url),
             ]
-            # 拉详情补充正文
-            try:
-                det = await fetch_json(detail_url, p.get("timeout", 15.0))
-                if det.get("code") == 0 and det.get("data", {}).get("content"):
-                    claims.append(FieldClaim(field="content", value=det["data"]["content"], source=self.SOURCE_ID, weight=self.WEIGHT, url=detail_url))
-            except Exception:
-                pass
+            # 详情仅在必要时拉取：最新 N 条，或标题含活动/寻访/通讯关键词（如复刻预告、制作组通讯）
+            need_detail = i < detail_limit or any(
+                k in title for k in ("开启", "预告", "通讯", "寻访", "活动")
+            )
+            if need_detail:
+                try:
+                    det = await fetch_json(detail_url, p.get("timeout", 15.0))
+                    if det.get("code") == 0 and det.get("data", {}).get("content"):
+                        claims.append(FieldClaim(field="content", value=det["data"]["content"], source=self.SOURCE_ID, weight=self.WEIGHT, url=detail_url))
+                except Exception:
+                    pass
             items.append({"raw_title": title, "claims": claims, "url": detail_url, "raw": item})
         return items

@@ -111,7 +111,9 @@ class BiliDynamicAdapter(BaseAdapter):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
             "Referer": "https://www.bilibili.com/",
         }
-        # 同一个 session：先访问主页拿 buvid cookie，再拿 wbi 密钥，最后请求动态
+        items: list[dict[str, Any]] = []
+        # P1-2：同一 session（保持 buvid cookie）内先试 wbi 签名请求；
+        # 签名失败/返回空（风控）时回退一次无签名请求，均失败则静默返回空（不拖累其他游戏）
         async with httpx.AsyncClient(timeout=p.get("timeout", 15.0), headers=headers, follow_redirects=True) as client:
             # 访问主页触发 Set-Cookie（buvid3 等）
             try:
@@ -119,26 +121,43 @@ class BiliDynamicAdapter(BaseAdapter):
             except Exception:
                 pass  # 主页失败不影响，cookie 可能已种下
 
-            img_key, sub_key = await self._get_wbi_keys(client)
+            for attempt in ("wbi", "plain"):
+                try:
+                    if attempt == "wbi":
+                        img_key, sub_key = await self._get_wbi_keys(client)
+                        params = _enc_wbi(
+                            {"host_mid": uid, "timezone_offset": "-480", "features": "itemOpusStyle"},
+                            img_key, sub_key,
+                        )
+                        url = f"{_DYNAMIC_URL}?{urllib.parse.urlencode(params)}"
+                    else:
+                        url = f"{_DYNAMIC_URL}?host_mid={uid}&timezone_offset=-480&features=itemOpusStyle"
+                    data = await self._session_get_json(client, url)
+                    if data.get("code") != 0:
+                        self._log(f"B站动态 {attempt} 请求 code={data.get('code')}，降级重试")
+                        continue
+                    got = self._parse_items(data)
+                    if got:
+                        items = got
+                        break
+                    # code==0 但空列表：多为匿名 IP 风控，降级重试一次
+                    self._log(f"B站动态 {attempt} 请求返回空列表（可能风控），降级重试")
+                except Exception as e:
+                    self._log(f"B站动态 {attempt} 请求异常: {e}")
+                    if attempt == "plain":
+                        break
 
-            params = _enc_wbi(
-                {"host_mid": uid, "timezone_offset": "-480", "features": "itemOpusStyle"},
-                img_key, sub_key,
-            )
-            url = f"{_DYNAMIC_URL}?{urllib.parse.urlencode(params)}"
-            data = await self._session_get_json(client, url)
-            if not isinstance(data, dict):
-                raise RuntimeError(f"B站动态接口返回异常: {str(data)[:200]}")
+        if not items:
+            self._log(f"B站动态最终返回空（uid={uid}，风控冷却），本次跳过")
+        # 只缓存非空结果：空列表（风控）不缓存，下次触发立即重试
+        if items:
+            _cache[uid] = (time.time(), items)
+        return items
 
-        if data.get("code") != 0:
-            raise RuntimeError(f"B站动态接口 code={data.get('code')} msg={data.get('message')}")
-
+    def _parse_items(self, data: dict) -> list[dict]:
+        """从 feed 响应提取条目（置顶跳过、文本抽取），与 _extract_text 共用。"""
         payload = data.get("data") or {}
         raw_items = payload.get("items") or []
-        if not raw_items:
-            # B站对匿名请求有间隔风控，可能返回空列表；这是正常现象，下次轮询会恢复
-            self._log("B站动态返回空列表（可能命中风控冷却），本次跳过")
-
         items: list[dict[str, Any]] = []
         for card in raw_items:
             # 跳过置顶动态（防假冒声明、公告置顶等，不属于版本信息）
@@ -159,9 +178,6 @@ class BiliDynamicAdapter(BaseAdapter):
                 dt = datetime.datetime.fromtimestamp(ts)
                 claims.append(FieldClaim(field="pub_time", value=dt.strftime("%Y-%m-%d %H:%M"), source=self.SOURCE_ID, weight=self.WEIGHT, url=url))
             items.append({"raw_title": text[:60], "claims": claims, "url": url, "raw": card})
-        # 只缓存非空结果：空列表（风控）不缓存，下次触发立即重试
-        if items:
-            _cache[uid] = (time.time(), items)
         return items
 
     def _extract_text(self, card: dict) -> str:

@@ -148,9 +148,11 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
                     got_name = True
             # 活动/关卡时间："开放时间：08月01日 12:00 - 08月22日 03:59"（关卡）或
             # "活动时间：08月01日 12:00 - 08月29日 03:59"（含商店）
-            # 版本结束以关卡时间为准：优先"开放时间"，没有才用"活动时间"
-            # 预告类公告（"即将开启"/"活动预告"）：优先"活动时间"（预告第一段即完整活动期，如复刻 8/22~9/5），
-            # 且活动时间同时映射到 next_activity_start/end（该活动属于"下版本"，供栏位B官方日期与预告升格）
+            # 【D2 有意设计·勿统一】双语义固化（2026-08 实测校准）：
+            #   - 普通活动公告：优先"开放时间"（关卡期）→ activity_end=关卡结束（如酸橙 8/22 关卡结束）
+            #   - 预告类公告（"即将开启"/"活动预告"）：优先"活动时间"（预告第一段即完整活动期含商店，
+            #     如墟复刻 8/22~9/5）→ 驱动栏位B官方日期与预告升格
+            # 改动此语义会破坏"酸橙 8/22 结束 / 墟 9/5 结束"的既有验收基准
             is_preview = any(k in title for k in ("即将开启", "活动预告"))
             m_at = None
             for kw in (("活动时间", "开放时间") if is_preview else ("开放时间", "活动时间")):
@@ -170,12 +172,6 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
                 if is_preview:
                     out.append(FieldClaim("next_activity_start", start_s, "parse", 1.0, source_url))
                     out.append(FieldClaim("next_activity_end", end_s, "parse", 1.0, source_url))
-            else:
-                # 正文没有活动时间，用公告发布日期兜底（displayTime）
-                for c in claims:
-                    if c.field == "display_time" and c.value:
-                        out.append(FieldClaim("update_time", c.value, "parse", 1.0, source_url))
-                        break
             # 限定寻访时间："二、「夏日嘉年华」，【车辙与风的归所】限定寻访开启" 后跟 "活动时间：08月01日 - 08月15日"
             # 中间可能跨行（开启 在上一行，活动时间 在下一行）
             m_banner = re.search(r"【([^】]+)】限定寻访.*?活动时间[：:]\s*(\d{1,2})月(\d{1,2})日.*?[-—~～]\s*(\d{1,2})月(\d{1,2})日", content, re.S)
@@ -194,6 +190,13 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
                     f"{year}-{int(m_banner.group(4)):02d}-{int(m_banner.group(5)):02d}",
                     "parse", 1.0, source_url,
                 ))
+        # 正文没有活动时间（或正文为空）时，用公告发布日期兜底 update_time。
+        # 独立于 content：图片正文公告 content 为空，仍需要 start 锚点供事件状态机使用
+        if not any(c.field == "update_time" for c in out):
+            for c in claims:
+                if c.field == "display_time" and c.value:
+                    out.append(FieldClaim("update_time", c.value, "parse", 1.0, source_url))
+                    break
         # 泛寻访/甄选公告：池名在标题首行（详情常为图片、正文为空）
         #   例：'中坚甄选 限时寻访开启' / '【联合行动】定向寻访开启' / B站动态 '中坚甄选开启'
         #   时间双通道：正文"活动时间"行，或标题自带 "活动时间：08月20日 04:00 - 09月03日 03:59"
@@ -489,11 +492,36 @@ def extract_preview_claims(item: dict[str, Any], cfg: GameConfig, main_start: da
     return out
 
 
+def extract_roadmap_nodes(item: dict[str, Any]) -> list[FieldClaim]:
+    """制作组通讯等路线图公告 → roadmap 节点（活动名 + 粗窗口字符串）。
+
+    例："SideStory「月行水上」限时活动将于9月上旬开启" → (月行水上, 9月上旬)
+    粗窗口（X月上旬/中旬/下旬）按原始字符串保留，不假装精确日期（P1-1）。
+    """
+    out: list[FieldClaim] = []
+    contents = [c.value for c in item.get("claims", []) if c.field == "content"]
+    content = "\n".join(_strip_html(c) for c in contents)
+    url = item.get("url", "")
+    for m in re.finditer(
+        r"[「『]([^」』]{1,20})[」』][^。\n]{0,40}?将于\s*(\d{1,2}月(?:上|中|下){1,2}旬)\s*开启",
+        content,
+    ):
+        name = m.group(1).strip()
+        window = m.group(2).strip()
+        if name and window and not any(w in name for w in BAD_CHAR_WORDS):
+            out.append(FieldClaim("roadmap_node", f"{name}|{window}", "parse", 1.0, url))
+    return out
+
+
 def aggregate(claims: list[FieldClaim], publish_threshold: float) -> dict[str, FieldVerdict]:
     """字段级交叉认证：同字段多源声明 → 加权置信度。
 
     置信度 = 最高源权重 + 0.15 × (一致源数 - 1)，上限 1.0。
     字段声明之间 value 归一化后相同视为「一致」。
+
+    【M6 裁定·文档化】本机制定位为"多源一致加分"而非"单源错误过滤"：
+    parse 权重 1.0 时单源即满置信（conf=1.0），不产生 pending（待确认）；
+    known_dates 权重 1.5 保证兜底优先于一切 parse 值。
     """
     by_field: dict[str, list[FieldClaim]] = {}
     for c in claims:

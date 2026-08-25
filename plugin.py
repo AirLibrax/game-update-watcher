@@ -17,6 +17,7 @@ import asyncio
 import json
 import re
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # 确保插件目录及其父目录在 sys.path 上：MaiBot Runner 加载 plugin.py 时
@@ -69,6 +70,21 @@ class PluginSection(PluginConfigBase):
         default_factory=list,
         description="定时推送目标 QQ 群号",
         json_schema_extra={"label": "目标群号", "hint": "定时推送用的群号列表；Tool/指令触发不受限"},
+    )
+    publish_threshold: float = Field(
+        default=0.8,
+        description="发布阈值：字段置信度达到该值才上卡片（0.5~1.0）",
+        json_schema_extra={"label": "发布阈值"},
+    )
+    http_timeout_seconds: int = Field(
+        default=15,
+        description="采集请求超时（秒）",
+        json_schema_extra={"label": "请求超时"},
+    )
+    debug: bool = Field(
+        default=False,
+        description="调试模式（打印更多日志，图片加水印 DEBUG）",
+        json_schema_extra={"label": "调试模式"},
     )
 
 
@@ -163,6 +179,15 @@ class GameUpdatePlugin(MaiBotPlugin):
 
     async def on_load(self) -> None:
         self._task: asyncio.Task | None = None
+        # H3 修复：先初始化全部运行属性为默认值，再检查依赖；
+        # 依赖缺失提前 return 后，Tool/Command 入口不会因属性缺失 AttributeError
+        self._ready = False
+        self._cfg: dict = {}
+        self._cfg_plugin: dict = {}
+        self._games: dict = {}
+        self._pipeline = None
+        self._store = None
+        self._runtime_dir = None
         # 依赖检查：httpx / pillow 是第三方库，MaiBot 不保证自带
         missing = []
         for mod in ("httpx", "PIL"):
@@ -176,6 +201,13 @@ class GameUpdatePlugin(MaiBotPlugin):
                 ", ".join(missing),
             )
             return
+        # M5：公告时间均为 UTC+8，本地时区偏移非 +8 时日期判定会偏移，启动时警告
+        local_offset = datetime.now().astimezone().utcoffset()
+        if local_offset is not None and local_offset != timedelta(hours=8):
+            self.ctx.logger.warning(
+                "本地时区偏移 %s（官方公告时间为 UTC+8），版本节奏/活动结束判定可能偏移一天",
+                local_offset,
+            )
         data_dir = self.ctx.paths.data_dir
         runtime_dir = self.ctx.paths.runtime_dir
 
@@ -212,6 +244,7 @@ class GameUpdatePlugin(MaiBotPlugin):
             "game-update-watcher 加载完成，跟踪游戏: %s",
             ", ".join(c.display for c in self._games.values()),
         )
+        self._ready = True
 
         # 定时轮询（可选）：默认关闭，用 Tool/Command 按需触发
         if self._cfg_plugin.get("scheduled_enabled", False):
@@ -250,6 +283,8 @@ class GameUpdatePlugin(MaiBotPlugin):
     async def handle_tool_report(self, stream_id: str = "", **kwargs) -> dict:
         # stream_id 不声明为 LLM 参数：由 Host 注入权威值，避免 LLM 填错发送目标
         stream_id = (stream_id or str(kwargs.get("stream_id") or "")).strip()
+        if not getattr(self, "_ready", False):
+            return {"success": False, "message": "插件未就绪（依赖缺失），请先安装 httpx pillow 后重启"}
         if not stream_id:
             return {"success": False, "message": "无法获取当前聊天流 ID"}
         result = await self._build_and_send(stream_id)
@@ -259,6 +294,8 @@ class GameUpdatePlugin(MaiBotPlugin):
     async def handle_cmd_report(self, **kwargs) -> tuple[bool, str, int]:
         stream_id = kwargs.get("stream_id", "")
         text = kwargs.get("text", "") or ""
+        if not getattr(self, "_ready", False):
+            return False, "插件未就绪（依赖缺失），请先安装 httpx pillow 后重启", 2
         if not stream_id:
             return False, "无法获取当前聊天流", 2
         # 解析可选游戏名："/游戏速报" 全部输出，"/游戏速报 终末地" 单游戏
@@ -288,6 +325,22 @@ class GameUpdatePlugin(MaiBotPlugin):
             if any(name in c or c in name for c in candidates if c):
                 return key
         return None
+
+    def _status_line(self) -> str:
+        """数据源状态行（P1-3）：主源✓/✗ + B站站✓/风控/✗，用于汇总图底部。"""
+        st = getattr(self._pipeline, "collect_status", None) or {}
+        parts = []
+        for key, gc in self._games.items():
+            s = st.get(key) or {}
+            main = s.get("main")
+            m = "✓" if main == "ok" else ("✗" if main == "fail" else "·")
+            bili = s.get("bili")
+            if bili is None:
+                parts.append(f"{gc.short}{m}")
+            else:
+                b = "站✓" if bili == "ok" else ("站~" if bili == "empty" else "站✗")
+                parts.append(f"{gc.short}{m}{b}")
+        return "数据源 " + " ".join(parts) if parts else ""
 
     # ---------- 核心：采集 + 渲染 + 发送到指定聊天流 ----------
 
@@ -339,7 +392,8 @@ class GameUpdatePlugin(MaiBotPlugin):
                     png = render_summary(entries, self._runtime_dir / f"{keys[0]}_info.png", watermark)
             else:
                 # 全部游戏：汇总长图
-                png = render_summary(entries, self._runtime_dir / "summary.png", watermark)
+                png = render_summary(entries, self._runtime_dir / "summary.png", watermark,
+                                     status_line=self._status_line())
             b64 = self._pipeline.encode_image(png)
             ok = await self.ctx.send.image(image_data=b64, stream_id=stream_id)
             if ok:
@@ -382,7 +436,8 @@ class GameUpdatePlugin(MaiBotPlugin):
             return
 
         try:
-            png = render_summary(new_entries, self._runtime_dir / "summary.png", watermark)
+            png = render_summary(new_entries, self._runtime_dir / "summary.png", watermark,
+                                 status_line=self._status_line())
             b64 = self._pipeline.encode_image(png)
             sent = await self._send_image_to_groups(b64, groups)
             if sent:

@@ -39,6 +39,19 @@ async def main() -> None:
         up_list = await collect_entries(pipeline, cfg, threshold=0.8)
         all_entries.extend(up_list)
 
+    # 数据源状态（P1-3）
+    st = getattr(pipeline, "collect_status", None) or {}
+    if st:
+        parts = []
+        for key, s in st.items():
+            m = {"ok": "✓", "empty": "·", "fail": "✗"}.get(s.get("main"), "·")
+            b = s.get("bili")
+            if b is None:
+                parts.append(f"{key}{m}")
+            else:
+                parts.append(f"{key}{m}站{'✓' if b == 'ok' else ('~' if b == 'empty' else '✗')}")
+        print(f"\n[数据源状态] {' '.join(parts)}")
+
     if all_entries:
         OUT_DIR.mkdir(exist_ok=True)
         try:
