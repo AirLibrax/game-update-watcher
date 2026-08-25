@@ -10,7 +10,7 @@ import json
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from guw_core.adapters import create_adapter
 from guw_core.models import FieldVerdict, GameConfig, GameUpdate
@@ -34,6 +34,8 @@ class UpdatePipeline:
         self.store = store
         # 数据源状态（P1-3）：game_key -> {"main": ok|empty|fail, "bili": ok|empty|fail|None}
         self.collect_status: dict[str, dict[str, str | None]] = {}
+        # P2-1 LLM 兜底回调（由插件注入，带 ctx.llm）：async (title, content) -> dict | None
+        self.llm_fallback: Callable | None = None
 
     def _log(self, msg: str) -> None:
         if self.logger:
@@ -224,17 +226,18 @@ class UpdatePipeline:
                 for f in ("next_name", "next_version", "next_characters", "preview_time"):
                     up.fields.pop(f, None)
 
-        # 预告类公告（preview_sources，如终末地研发通讯/B站活动说明/干员演示动态）→ next_* 注入主条目
-        # 角色类字段多条目累加合并（去重保序）；单值字段首项优先；已有官方/known 值不覆盖；
-        # 下半池（next_half_characters）角色不进上半名单（含 known_dates 兜底值，防重复展示）
-        # H1 守卫：预告信息不得自指当前版本（版本切换后研发通讯等仍在候选池 → next_name==当前版本名 跳过）、
-        #          next_update_time 必须晚于当前版本开始且在未来（防 B站旧动态日期回灌）
+        # 预告类公告（preview_sources，如终末地研发通讯/B站活动说明/干员演示/前瞻直播预告动态）
+        # → next_* 注入主条目。角色类字段多条目累加合并；单值字段自动值优先、known_dates 仅兜底
+        # （P2-3：B站前瞻自动提取优先于手填 known_dates，known 值在自动值缺失时才显示）；
+        # H1 守卫：自指/过早时间不注入。
         if preview_items and updates:
             main_upd = updates[0]
             main_start = _to_date(main_upd.field_value("update_time")) or date.today()
             main_start_s = main_start.isoformat()
+            llm_used = False  # P2-1：每轮每游戏最多 1 次 LLM 兜底（控成本）
             for pit in preview_items:
-                for claim in extract_preview_claims(pit, cfg, main_start):
+                claims = extract_preview_claims(pit, cfg, main_start)
+                for claim in claims:
                     if claim.field == "next_name" and claim.value == main_upd.version_name:
                         continue
                     if claim.field == "next_version" and main_upd.version_num and claim.value == main_upd.version_num:
@@ -243,6 +246,10 @@ class UpdatePipeline:
                         d = claim.value[:10]
                         if not d or d <= main_start_s or d <= today_s:
                             continue
+                    if claim.field == "preview_time":
+                        d = claim.value[:10]
+                        if not d or d <= main_start_s:
+                            continue  # 前瞻不得早于本版本开始（防旧版本前瞻残留）
                     cur = main_upd.fields.get(claim.field)
                     if claim.field in ("next_characters", "next_half_characters"):
                         half_set = {n.strip() for n in main_upd.field_value("next_half_characters").split(",") if n.strip()}
@@ -255,10 +262,23 @@ class UpdatePipeline:
                         main_upd.fields[claim.field] = FieldVerdict(
                             field=claim.field, value=",".join(names), confidence=1.0, sources=["parse"]
                         )
-                    elif not cur:
+                    elif not cur or cur.sources == ["known"]:
+                        # 自动抽取值优先；known_dates 手填值仅兜底（P2-3 裁定）
                         main_upd.fields[claim.field] = FieldVerdict(
                             field=claim.field, value=claim.value, confidence=1.0, sources=["parse"]
                         )
+                # P2-1 LLM 兜底：触发 = 预告池条目 + 正则未抽到 next_name/next_update_time + 正文含日期线索
+                if not llm_used and self.llm_fallback is not None:
+                    need_llm = not any(c.field in ("next_name", "next_update_time") for c in claims)
+                    pit_content = "\n".join(c.value for c in pit.get("claims", []) if c.field == "content")
+                    if need_llm and re.search(r"\d{1,2}月\d{1,2}日|\d{4}/\d{2}/\d{2}", pit_content):
+                        llm_used = True
+                        try:
+                            data = await self.llm_fallback(pit.get("raw_title", ""), pit_content)
+                        except Exception as e:
+                            self._log(f"[{cfg.display}] LLM 兜底调用异常，静默降级: {e}")
+                            data = None
+                        self._inject_llm_fields(main_upd, data, cfg, main_start)
 
             # 后处理：上半名单剔除已归入下半池的角色。
             # known_dates 兑底值走聚合通道（高权重）不经过上方注入过滤，
@@ -373,6 +393,49 @@ class UpdatePipeline:
                         )
             updates = [main]
         return updates
+
+    def _inject_llm_fields(self, main_upd: GameUpdate, data: dict | None, cfg: GameConfig, main_start: date) -> None:
+        """P2-1 LLM 兜底注入（带断言护栏，confidence ≤ 0.8 防弱源覆盖官方源）。
+
+        护栏（任一不满足即丢弃对应字段）：
+        - next_update_time：必须在未来 60 天内，且与周期推算（main_start + cycle_days）偏差 ≤ 14 天
+        - next_name：非空、不等于当前版本名（H1）
+        - next_characters：角色名长度 2~12
+        """
+        if not data or not isinstance(data, dict):
+            return
+        today = date.today()
+        # next_update_time
+        nvt = str(data.get("next_update_time") or "").strip()
+        if nvt:
+            d = _to_date(nvt)
+            est = main_start + timedelta(days=cfg.cycle_days)
+            if d and today < d <= today + timedelta(days=60) and abs((d - est).days) <= 14:
+                cur = main_upd.fields.get("next_update_time")
+                if not cur or cur.sources == ["known"]:
+                    main_upd.fields["next_update_time"] = FieldVerdict(
+                        field="next_update_time", value=nvt[:10], confidence=0.8, sources=["llm"]
+                    )
+        # next_name
+        nn = str(data.get("next_name") or "").strip()
+        if nn and nn != main_upd.version_name and not main_upd.field_value("next_name"):
+            main_upd.fields["next_name"] = FieldVerdict(
+                field="next_name", value=nn, confidence=0.8, sources=["llm"]
+            )
+        # next_characters（合并去重进上半名单）
+        nc = data.get("next_characters")
+        if isinstance(nc, list):
+            names = [str(x).strip() for x in nc if isinstance(x, str) and 1 < len(x.strip()) <= 12]
+            if names:
+                cur = main_upd.fields.get("next_characters")
+                merged = [n for n in (cur.value.split(",") if cur else []) if n]
+                for nm in names:
+                    if nm not in merged:
+                        merged.append(nm)
+                if merged:
+                    main_upd.fields["next_characters"] = FieldVerdict(
+                        field="next_characters", value=",".join(merged), confidence=0.8, sources=["llm"]
+                    )
 
     def _auth_match_key(self, item: dict, cfg: GameConfig, auth_claims: list | None = None) -> tuple[str, str]:
         """从认证源条目提取匹配键：(活动名, 版本号)。

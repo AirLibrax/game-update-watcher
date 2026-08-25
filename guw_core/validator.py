@@ -437,6 +437,20 @@ def extract_preview_claims(item: dict[str, Any], cfg: GameConfig, main_start: da
         if name and not any(w in name for w in BAD_CHAR_WORDS) and not re.search(r"[\d*×%]|：|:", name):
             out.append(FieldClaim("next_name", name, "parse", 1.0, url))
 
+    # P2-3 前瞻直播预告：如 "4.5版本「挥掷千星的筹码」前瞻特别节目将于2026年8月14日19:30播出"
+    # → preview_time=2026-08-14 19:30；"将于…开启/上线"等非直播句式不命中（后缀限定播出/直播/上线）
+    m_pv = re.search(r"将于\s*(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日\s*(\d{1,2}:\d{2})?\s*(?:播出|直播|上线)", content)
+    if m_pv:
+        year = int(m_pv.group(1)) if m_pv.group(1) else datetime.now().year
+        pv_time = f"{year:04d}-{int(m_pv.group(2)):02d}-{int(m_pv.group(3)):02d}"
+        if m_pv.group(4):
+            pv_time += f" {m_pv.group(4)}"
+        out.append(FieldClaim("preview_time", pv_time, "parse", 1.0, url))
+    # P2-3 next_version：标题 "N.N版本「X」前瞻…" → N.N
+    m_vn = re.search(r"(\d+\.\d+)\s*版本", title)
+    if m_vn:
+        out.append(FieldClaim("next_version", m_vn.group(1), "parse", 1.0, url))
+
     # next_update_time：斜杠日期 + 版本周期窗口
     lo = main_start + timedelta(days=cfg.cycle_days - 10)
     hi = main_start + timedelta(days=cfg.cycle_days + 10)

@@ -34,3 +34,7 @@ http_timeout_seconds = 15
 
 # 是否调试模式（打印更多日志，图片加水印 DEBUG）
 debug = false
+
+# P2-1 LLM 兜底抽取开关（默认关闭）：正则未抽到下版本信息且正文含日期线索时，
+# 调用 Host 的 LLM 辅助抽取（需 Host 授权 llm.generate 能力；失败/超时自动静默降级）
+llm_fallback_enabled = false

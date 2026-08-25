@@ -27,6 +27,9 @@
   "version_pattern": "(?P<num>[\\d.]+)版本「(?P<name>.+?)」",
   "title_include": ["更新公告", "更新说明", "版本更新", "调频"],
   "title_exclude": ["已知问题", "优化", "修复", "新增关卡", "概率公示", "封禁", "活动说明"],
+  "preview_sources": {
+    "title_include": ["前瞻", "特别节目", "直播"]
+  },
   "cycle_days": 42,
   "half_days": 21,
   "preview_ahead_days": 7,

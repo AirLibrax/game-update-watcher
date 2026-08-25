@@ -86,6 +86,11 @@ class PluginSection(PluginConfigBase):
         description="调试模式（打印更多日志，图片加水印 DEBUG）",
         json_schema_extra={"label": "调试模式"},
     )
+    llm_fallback_enabled: bool = Field(
+        default=False,
+        description="LLM 兜底抽取开关（正则未抽到下版本信息时调用 Host LLM 辅助，需 Host 授权）",
+        json_schema_extra={"label": "LLM 兜底抽取", "hint": "默认关闭；开启后仅在正则失败且正文含日期线索时调用，失败自动静默降级"},
+    )
 
 
 class PluginConfig(PluginConfigBase):
@@ -229,6 +234,11 @@ class GameUpdatePlugin(MaiBotPlugin):
         games_dir = Path(__file__).parent / "games"
         all_games = self._pipeline.load_games(games_dir)
 
+        # P2-1 LLM 兜底接线（默认关闭；开启后由管道按触发条件调用，失败静默降级）
+        if self._cfg_plugin.get("llm_fallback_enabled", False):
+            self._pipeline.llm_fallback = self._llm_fallback
+            self.ctx.logger.info("LLM 兜底抽取已启用（正则失败且正文含日期线索时触发）")
+
         # tracked_games 过滤：留空=全部，非空=只跟踪列表内的游戏
         tracked = self._cfg_plugin.get("tracked_games", []) or []
         if tracked:
@@ -325,6 +335,41 @@ class GameUpdatePlugin(MaiBotPlugin):
             if any(name in c or c in name for c in candidates if c):
                 return key
         return None
+
+    async def _llm_fallback(self, title: str, content: str) -> dict | None:
+        """P2-1 LLM 兜底抽取：预告正文排版差异导致正则未命中时，让 Host LLM 抽下版本信息。
+
+        本方法只负责调用 + JSON 解析；断言护栏（未来 60 天/周期偏差 ≤14 天/H1/confidence≤0.8）
+        在 pipeline._inject_llm_fields 统一执行。解析失败/调用异常一律返回 None（静默降级现状）。
+
+        注意：ctx.llm 能力需 Host 授权（_manifest capabilities 未声明 llm.generate 时会抛
+        E_CAPABILITY_DENIED，由管道捕获降级，不影响主流程；如需启用请声明该能力）。
+        """
+        prompt = (
+            "你是游戏公告信息抽取器。从下面这条游戏预告公告/官方动态中提取'下一版本'信息，"
+            "只输出 JSON，不要任何额外文字：\n"
+            '{"next_name": "下版本名（如 雪凇幽梦），无法确定则 null", '
+            '"next_update_time": "下版本更新日期 YYYY-MM-DD，必须公告中明确写明且是未来日期，否则 null", '
+            '"next_characters": ["新角色名", ...]，公告未明确列出则 null}\n'
+            "注意：next_update_time 不得编造；不确定的字段一律 null。\n"
+            f"标题：{title}\n正文（截断）：\n{content[:1500]}"
+        )
+        try:
+            result = await self.ctx.llm.generate(prompt, temperature=0.2)
+        except Exception as e:
+            self.ctx.logger.warning("LLM 兜底调用失败（静默降级）: %s", e)
+            return None
+        if not result or not result.get("success"):
+            return None
+        resp = str(result.get("response") or "")
+        m = re.search(r"\{.*\}", resp, re.S)
+        if not m:
+            return None
+        try:
+            data = json.loads(m.group(0))
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
 
     def _status_line(self) -> str:
         """数据源状态行（P1-3）：主源✓/✗ + B站站✓/风控/✗，用于汇总图底部。"""
