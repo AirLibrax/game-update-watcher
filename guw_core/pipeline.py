@@ -212,14 +212,27 @@ class UpdatePipeline:
                 for f in ("next_name", "next_version", "next_characters", "preview_time"):
                     up.fields.pop(f, None)
 
-        # 预告类公告（preview_sources，如终末地研发通讯/B站活动说明动态）→ next_* 注入主条目
-        # 首项优先（主源条目在前）：先注入的 next_name 不被后到的活动名覆盖；已有官方/known 值不覆盖
+        # 预告类公告（preview_sources，如终末地研发通讯/B站活动说明/干员演示动态）→ next_* 注入主条目
+        # 角色类字段多条目累加合并（去重保序）；单值字段首项优先；已有官方/known 值不覆盖；
+        # 下半池（next_half_characters）角色不进上半名单（含 known_dates 兜底值，防重复展示）
         if preview_items and updates:
             main_upd = updates[0]
             main_start = _to_date(main_upd.field_value("update_time")) or date.today()
             for pit in preview_items:
                 for claim in extract_preview_claims(pit, cfg, main_start):
-                    if not main_upd.field_value(claim.field):
+                    cur = main_upd.fields.get(claim.field)
+                    if claim.field in ("next_characters", "next_half_characters"):
+                        half_set = {n.strip() for n in main_upd.field_value("next_half_characters").split(",") if n.strip()}
+                        names = [n.strip() for n in (cur.value if cur else "").split(",") if n.strip()]
+                        if claim.field == "next_characters":
+                            names = [n for n in names if n not in half_set]
+                        for nm in [n.strip() for n in claim.value.split(",") if n.strip()]:
+                            if nm and nm not in names and (claim.field != "next_characters" or nm not in half_set):
+                                names.append(nm)
+                        main_upd.fields[claim.field] = FieldVerdict(
+                            field=claim.field, value=",".join(names), confidence=1.0, sources=["parse"]
+                        )
+                    elif not cur:
                         main_upd.fields[claim.field] = FieldVerdict(
                             field=claim.field, value=claim.value, confidence=1.0, sources=["parse"]
                         )
@@ -305,6 +318,52 @@ class UpdatePipeline:
                 main.fields["characters"] = FieldVerdict(
                     field="characters", value=",".join(merged), confidence=1.0, sources=["parse"]
                 )
+
+            # 当期寻访池：主活动未带 banner 信息时（如复刻主公告无寻访段），
+            # 从候选里聚合"寻访/甄选"类公告（图片正文时池名仍在标题/首行：
+            # '中坚甄选 限时寻访开启' / '【联合行动】定向寻访开启'；
+            # 官方活动时间可能由 B站动态文本补充，如 '中坚甄选开启\n活动时间：08月20日 04:00 - 09月03日 03:59'）
+            if not main.field_value("banner_name"):
+                main_urls = set(main.raw_urls)
+                for it in candidates:
+                    rt = it.get("raw_title", "")
+                    if not re.search(r"寻访|甄选", rt):
+                        continue
+                    if any(k in rt for k in ("时装", "皮肤", "周边", "模组", "常驻标准", "出率")):
+                        continue
+                    if it.get("url", "") in main_urls:
+                        continue  # 主活动自身（其正文寻访段已由 m_banner 提取）
+                    pre_claims = extract_fields(it, cfg)
+                    bn = next((c.value for c in pre_claims if c.field == "banner_name" and c.value), "")
+                    if not bn:
+                        continue
+                    # 池名注入（仅首次）；时间缺失时继续遍历候选补齐（B站动态可能带官方活动时间）
+                    if not main.field_value("banner_name"):
+                        main.fields["banner_name"] = FieldVerdict(
+                            field="banner_name", value=bn, confidence=1.0, sources=["parse"]
+                        )
+                    bs = next((c.value for c in pre_claims if c.field == "banner_start" and c.value), "")
+                    be = next((c.value for c in pre_claims if c.field == "banner_end" and c.value), "")
+                    if bs and not main.field_value("banner_start"):
+                        main.fields["banner_start"] = FieldVerdict(
+                            field="banner_start", value=bs, confidence=1.0, sources=["parse"]
+                        )
+                    if be and not main.field_value("banner_end"):
+                        main.fields["banner_end"] = FieldVerdict(
+                            field="banner_end", value=be, confidence=1.0, sources=["parse"]
+                        )
+                    # 寻访公告带干员列表时并入当期（图片正文通常没有，留扩展位）
+                    bc = next((c.value for c in pre_claims if c.field == "characters" and c.value), "")
+                    if bc:
+                        all_names = [x.strip() for x in main.field_value("characters").split(",") if x.strip()]
+                        for nm in [x.strip() for x in bc.split(",") if x.strip()]:
+                            if nm and nm not in all_names:
+                                all_names.append(nm)
+                        main.fields["characters"] = FieldVerdict(
+                            field="characters", value=",".join(all_names), confidence=1.0, sources=["parse"]
+                        )
+                    if main.field_value("banner_name") and main.field_value("banner_end"):
+                        break  # 池名+官方时间齐了才停
             updates = [main]
         return updates
 

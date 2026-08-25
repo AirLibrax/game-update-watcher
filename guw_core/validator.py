@@ -137,61 +137,95 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
     #    方舟（活动制）：优先从正文提取 SideStory 名（如 SideStory「直到大地变成一颗酸橙」）
     vp = cfg.version_pattern
     got_name = False
-    if cfg.activity_mode and content:
-        m_ss = re.search(r"SideStory「([^」]+)」|「([^」]+)」活动开启|「([^」]+)」限时活动", content)
-        if m_ss:
-            name = next((g for g in m_ss.groups() if g), "")
-            if name:
-                out.append(FieldClaim("version_name", name.strip(), "parse", 1.0, source_url))
-                got_name = True
-        # 活动/关卡时间："开放时间：08月01日 12:00 - 08月22日 03:59"（关卡）或
-        # "活动时间：08月01日 12:00 - 08月29日 03:59"（含商店）
-        # 版本结束以关卡时间为准：优先"开放时间"，没有才用"活动时间"
-        # 预告类公告（"即将开启"/"活动预告"）：优先"活动时间"（预告第一段即完整活动期，如复刻 8/22~9/5），
-        # 且活动时间同时映射到 next_activity_start/end（该活动属于"下版本"，供栏位B官方日期与预告升格）
-        is_preview = any(k in title for k in ("即将开启", "活动预告"))
-        m_at = None
-        for kw in (("活动时间", "开放时间") if is_preview else ("开放时间", "活动时间")):
-            m_at = re.search(
-                rf"{kw}[：:]\s*(\d{{1,2}})月(\d{{1,2}})日[^\n]*?[-—~～]\s*(\d{{1,2}})月(\d{{1,2}})日",
-                content,
-            )
-            if m_at:
-                break
-        if m_at:
-            # 年份取当前年（公告通常年内活动）
-            year = datetime.now().year
-            start_s = f"{year}-{int(m_at.group(1)):02d}-{int(m_at.group(2)):02d}"
-            end_s = f"{year}-{int(m_at.group(3)):02d}-{int(m_at.group(4)):02d}"
-            out.append(FieldClaim("update_time", start_s, "parse", 1.0, source_url))
-            out.append(FieldClaim("activity_end", end_s, "parse", 1.0, source_url))
-            if is_preview:
-                out.append(FieldClaim("next_activity_start", start_s, "parse", 1.0, source_url))
-                out.append(FieldClaim("next_activity_end", end_s, "parse", 1.0, source_url))
-        else:
-            # 正文没有活动时间，用公告发布日期兜底（displayTime）
-            for c in claims:
-                if c.field == "display_time" and c.value:
-                    out.append(FieldClaim("update_time", c.value, "parse", 1.0, source_url))
+    if cfg.activity_mode:
+        m_banner = None  # 正文寻访段（限定寻访）；块外泛寻访分支引用
+        if content:
+            m_ss = re.search(r"SideStory「([^」]+)」|「([^」]+)」活动开启|「([^」]+)」限时活动", content)
+            if m_ss:
+                name = next((g for g in m_ss.groups() if g), "")
+                if name:
+                    out.append(FieldClaim("version_name", name.strip(), "parse", 1.0, source_url))
+                    got_name = True
+            # 活动/关卡时间："开放时间：08月01日 12:00 - 08月22日 03:59"（关卡）或
+            # "活动时间：08月01日 12:00 - 08月29日 03:59"（含商店）
+            # 版本结束以关卡时间为准：优先"开放时间"，没有才用"活动时间"
+            # 预告类公告（"即将开启"/"活动预告"）：优先"活动时间"（预告第一段即完整活动期，如复刻 8/22~9/5），
+            # 且活动时间同时映射到 next_activity_start/end（该活动属于"下版本"，供栏位B官方日期与预告升格）
+            is_preview = any(k in title for k in ("即将开启", "活动预告"))
+            m_at = None
+            for kw in (("活动时间", "开放时间") if is_preview else ("开放时间", "活动时间")):
+                m_at = re.search(
+                    rf"{kw}[：:]\s*(\d{{1,2}})月(\d{{1,2}})日[^\n]*?[-—~～]\s*(\d{{1,2}})月(\d{{1,2}})日",
+                    content,
+                )
+                if m_at:
                     break
-        # 限定寻访时间："二、「夏日嘉年华」，【车辙与风的归所】限定寻访开启" 后跟 "活动时间：08月01日 - 08月15日"
-        # 中间可能跨行（开启 在上一行，活动时间 在下一行）
-        m_banner = re.search(r"【([^】]+)】限定寻访.*?活动时间[：:]\s*(\d{1,2})月(\d{1,2})日.*?[-—~～]\s*(\d{1,2})月(\d{1,2})日", content, re.S)
-        if m_banner:
-            year = datetime.now().year
-            out.append(FieldClaim(
-                "banner_name", m_banner.group(1).strip(), "parse", 1.0, source_url,
-            ))
-            out.append(FieldClaim(
-                "banner_start",
-                f"{year}-{int(m_banner.group(2)):02d}-{int(m_banner.group(3)):02d}",
-                "parse", 1.0, source_url,
-            ))
-            out.append(FieldClaim(
-                "banner_end",
-                f"{year}-{int(m_banner.group(4)):02d}-{int(m_banner.group(5)):02d}",
-                "parse", 1.0, source_url,
-            ))
+            if m_at:
+                # 年份取当前年（公告通常年内活动）
+                year = datetime.now().year
+                start_s = f"{year}-{int(m_at.group(1)):02d}-{int(m_at.group(2)):02d}"
+                end_s = f"{year}-{int(m_at.group(3)):02d}-{int(m_at.group(4)):02d}"
+                out.append(FieldClaim("update_time", start_s, "parse", 1.0, source_url))
+                out.append(FieldClaim("activity_end", end_s, "parse", 1.0, source_url))
+                if is_preview:
+                    out.append(FieldClaim("next_activity_start", start_s, "parse", 1.0, source_url))
+                    out.append(FieldClaim("next_activity_end", end_s, "parse", 1.0, source_url))
+            else:
+                # 正文没有活动时间，用公告发布日期兜底（displayTime）
+                for c in claims:
+                    if c.field == "display_time" and c.value:
+                        out.append(FieldClaim("update_time", c.value, "parse", 1.0, source_url))
+                        break
+            # 限定寻访时间："二、「夏日嘉年华」，【车辙与风的归所】限定寻访开启" 后跟 "活动时间：08月01日 - 08月15日"
+            # 中间可能跨行（开启 在上一行，活动时间 在下一行）
+            m_banner = re.search(r"【([^】]+)】限定寻访.*?活动时间[：:]\s*(\d{1,2})月(\d{1,2})日.*?[-—~～]\s*(\d{1,2})月(\d{1,2})日", content, re.S)
+            if m_banner:
+                year = datetime.now().year
+                out.append(FieldClaim(
+                    "banner_name", m_banner.group(1).strip(), "parse", 1.0, source_url,
+                ))
+                out.append(FieldClaim(
+                    "banner_start",
+                    f"{year}-{int(m_banner.group(2)):02d}-{int(m_banner.group(3)):02d}",
+                    "parse", 1.0, source_url,
+                ))
+                out.append(FieldClaim(
+                    "banner_end",
+                    f"{year}-{int(m_banner.group(4)):02d}-{int(m_banner.group(5)):02d}",
+                    "parse", 1.0, source_url,
+                ))
+        # 泛寻访/甄选公告：池名在标题首行（详情常为图片、正文为空）
+        #   例：'中坚甄选 限时寻访开启' / '【联合行动】定向寻访开启' / B站动态 '中坚甄选开启'
+        #   时间双通道：正文"活动时间"行，或标题自带 "活动时间：08月20日 04:00 - 09月03日 03:59"
+        if not m_banner and re.search(r"寻访开启|定向寻访|甄选", re.sub(r"\s+", "", title)):
+            m_bn = re.search(r"[【\[]([^】\]]+)[】\]]", title)
+            bn = m_bn.group(1).strip() if m_bn else ""
+            if not bn:
+                first_line = (title.split("\n")[0] if "\n" in title else title)
+                flat = re.sub(r"\s+", "", first_line)
+                for suf in ("限时寻访开启", "定向寻访开启", "寻访开启", "限时开启", "开启"):
+                    if flat.endswith(suf):
+                        bn = flat[: -len(suf)]
+                        break
+                bn = bn or flat
+            if bn and not any(w in bn for w in BAD_CHAR_WORDS):
+                out.append(FieldClaim("banner_name", bn, "parse", 1.0, source_url))
+                m_bt = re.search(
+                    r"活动时间[：:]\s*(\d{1,2})月(\d{1,2})日[^\n]*?[-—~～]\s*(\d{1,2})月(\d{1,2})日",
+                    content + "\n" + title,
+                )
+                if m_bt:
+                    year = datetime.now().year
+                    out.append(FieldClaim(
+                        "banner_start",
+                        f"{year}-{int(m_bt.group(1)):02d}-{int(m_bt.group(2)):02d}",
+                        "parse", 1.0, source_url,
+                    ))
+                    out.append(FieldClaim(
+                        "banner_end",
+                        f"{year}-{int(m_bt.group(3)):02d}-{int(m_bt.group(4)):02d}",
+                        "parse", 1.0, source_url,
+                    ))
     if vp:
         m = re.search(vp, title)
         if m:
@@ -377,13 +411,15 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
 
 
 def extract_preview_claims(item: dict[str, Any], cfg: GameConfig, main_start: date) -> list[FieldClaim]:
-    """预告类条目 → next_* 字段声明（版本名/更新时间/新角色）。
+    """预告类条目 → next_* 字段声明（版本名/更新时间/新角色/下半池）。
 
-    供 preview_sources 配置的预告池使用（如终末地「X」版本研发通讯、B站官方活动说明动态）：
+    供 preview_sources 配置的预告池使用（终末地：研发通讯 / B站活动说明 / 「X - 干员演示」动态）：
     - next_name：标题「版本名」→ 下版本名（「雪凇幽梦」版本研发通讯 → 雪凇幽梦）
     - next_update_time：正文/动态文本里的斜杠日期 YYYY/MM/DD [HH:MM]，
       取落在 [主版本更新日 + cycle±10 天] 窗口内的第一个（排除当期活动日期与已过去日期）
-    - next_characters：星级前缀角色（仅预告正文明确写"干员/角色"的场景，防误抓）
+    - next_characters：版本新干员（星级前缀角色 + '//名字 - 干员演示' 官方动态；已归下半池的跳过）
+    - next_banner_name/next_banner_start/next_half_characters：版本内后续寻访池
+      （如研发通讯「绚丽异彩」重构寻访#1 于 2026/9/24 开启、6星干员【伊冯】概率大幅提升）
     """
     out: list[FieldClaim] = []
     title = item.get("raw_title", "")
@@ -415,10 +451,40 @@ def extract_preview_claims(item: dict[str, Any], cfg: GameConfig, main_start: da
             ))
             break
 
-    # next_characters：星级前缀角色
+    # 版本内后续寻访池：「绚丽异彩」重构寻访#1将于2026年9月24日开启…6星干员【伊冯】获取概率大幅提升
+    #   （"寻访"限定干员池；"申领"是武器池，正则天然排除）
+    m_ban = re.search(
+        r"「([^」]{1,20})」重构寻访[^。\n]{0,60}?将于(\d{4})年(\d{1,2})月(\d{1,2})日开启"
+        r"[^。\n]{0,60}?(\d)星干员【([^】]{1,12})】",
+        content,
+    )
+    if m_ban:
+        out.append(FieldClaim("next_banner_name", m_ban.group(1).strip(), "parse", 1.0, url))
+        out.append(FieldClaim(
+            "next_banner_start",
+            f"{int(m_ban.group(2)):04d}-{int(m_ban.group(3)):02d}-{int(m_ban.group(4)):02d}",
+            "parse", 1.0, url,
+        ))
+        out.append(FieldClaim("next_half_characters", m_ban.group(6).strip(), "parse", 1.0, url))
+
+    # 版本新干员：星级前缀角色，且仅接受"全新/新增干员"语义上下文（预告正文的"6星干员"泛指
+    # 词组如"概率提升的6星干员的信物"会误抓碎片；已归入后续寻访池的干员跳过防重复）
+    half_names = {c.value for c in out if c.field == "next_half_characters"}
     for m in RE_CHAR_BANNER.finditer(content):
         name = m.group(1).strip()
-        if name and not any(w in name for w in BAD_CHAR_WORDS) and not re.search(r"[\d*×%]|：|:", name):
+        if not name or name in half_names:
+            continue
+        if any(w in name for w in BAD_CHAR_WORDS) or re.search(r"[\d*×%]|：|:", name):
+            continue
+        ctx = content[max(0, m.start() - 10):m.start()]
+        if not re.search(r"全新|新增|新干员", ctx):
+            continue
+        out.append(FieldClaim("next_characters", name, "parse", 1.0, url))
+    # 「//提弗洛斯 - 干员演示」官方动态（B站文本，无星级前缀，需专用格式）
+    m_demo = re.search(r"//\s*([^/\-\s·]{2,12})\s*[-—]\s*干员演示", title)
+    if m_demo:
+        name = m_demo.group(1).strip()
+        if name and name not in half_names and not any(w in name for w in BAD_CHAR_WORDS):
             out.append(FieldClaim("next_characters", name, "parse", 1.0, url))
     return out
 

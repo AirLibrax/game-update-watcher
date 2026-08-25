@@ -148,6 +148,19 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
     else:
         next_title = "未知版本名"
 
+    # 下版本角色行：版本新干员 + 版本内后续寻访池（下半池）干员
+    half_chars_known = update.field_value("next_half_characters")
+    nb_start = parse_date(update.field_value("next_banner_start"))
+    if half_chars_known:
+        extra_half = f"下半池：{half_chars_known}"
+        if nb_start:
+            extra_half += f"（{fmt_date(nb_start)} 开放）"
+    else:
+        extra_half = ""
+    next_all_chars = lambda chars_str: "；".join(
+        x for x in (chars_str, extra_half) if x
+    )
+
     # 已知的确定信息
     has_preview = bool(update.field_value("preview_time"))
     up_chars = _up_chars_str(update)
@@ -220,7 +233,7 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
             all_chars,
             estimated=preview_est,
         ))
-        next_chars = f"新角色：{next_chars_known}" if next_chars_known else ""
+        next_chars = next_all_chars(f"新角色：{next_chars_known}" if next_chars_known else "")
         slots.append(TimelineSlot(
             "下版本·更新时间",
             next_title,
@@ -231,7 +244,7 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
         ))
     else:
         # 第 6 周：下版本时间 + 下版本上半池（本版本角色仍显示）
-        next_chars = f"新角色：{next_chars_known}" if next_chars_known else ""
+        next_chars = next_all_chars(f"新角色：{next_chars_known}" if next_chars_known else "")
         slots.append(TimelineSlot(
             "下版本·更新时间",
             next_title,
@@ -272,15 +285,24 @@ def _activity_timeline(update: GameUpdate, cfg: GameConfig, start: date, today: 
     # 复刻标记来自原始公告标题（活动名本身不含"复刻"）
     is_reprint = bool(update.field_value("is_reprint"))
 
-    # 栏位A：本版本（版本名 + 商店结束 + 新干员及寻访结束日期）
+    # 栏位A：本版本（版本名 + 商店结束 + 新干员及寻访池说明）
     a_label = "本版本·复刻" if is_reprint else "本版本"
     a_chars = ""
     if char_list:
         prefix = "复刻干员：" if is_reprint else "新干员："
         a_chars = prefix + "、".join(char_list[:8])
-        # 追加寻访结束日期（官方时间）
+        # 追加寻访池说明（官方时间优先；图片正文公告无时间时只显示池名）
+        banner_name = update.field_value("banner_name")
+        banner_start = parse_date(update.field_value("banner_start"))
         banner_end = parse_date(update.field_value("banner_end"))
-        if banner_end:
+        if banner_name:
+            if banner_start and banner_end:
+                a_chars += f"（寻访 {banner_name} {fmt_date(banner_start)}~{fmt_date(banner_end)}）"
+            elif banner_end:
+                a_chars += f"（寻访 {banner_name} 至 {fmt_date(banner_end)}）"
+            else:
+                a_chars += f"（寻访池：{banner_name}）"
+        elif banner_end:
             a_chars += f"（寻访至 {fmt_date(banner_end)}）"
     slots = [TimelineSlot(
         a_label,
