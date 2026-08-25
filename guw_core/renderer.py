@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -66,6 +67,61 @@ def _fit_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont
     while text and draw.textlength(text + "…", font=font) > max_w:
         text = text[:-1]
     return text + "…"
+
+
+def _wrap_chars_lines(text: str, font: ImageFont.FreeTypeFont, max_w: int) -> list[str]:
+    """干员行折行：优先在分隔符（、；，）处断行，避免角色名被切成两半。
+
+    单个超长 token（如极长角色名）才硬切；用 font.getlength 测宽（不依赖 draw 对象，
+    高度预算与绘制共用同一结果，保证版式一致）。返回 0 行 = 无内容。
+    """
+    if not text:
+        return []
+    # 先按分隔符切 token（保留分隔符本身，折行时随前段走）
+    tokens: list[str] = []
+    for part in re.split(r"([、；;，,])", text):
+        if part:
+            tokens.append(part)
+    lines: list[str] = []
+    cur = ""
+    for tok in tokens:
+        if font.getlength(cur + tok) <= max_w:
+            cur += tok
+            continue
+        if cur:
+            lines.append(cur)
+            cur = ""
+        if font.getlength(tok) <= max_w:
+            cur = tok
+        else:
+            # 单个 token 超宽：按字符硬切（尽量优先断在中英文分隔处）
+            piece = ""
+            for ch in tok:
+                if font.getlength(piece + ch) <= max_w:
+                    piece += ch
+                else:
+                    if piece:
+                        lines.append(piece)
+                    piece = ch
+            cur = piece
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _slot_used_height(slot, fmt: dict, content_w: int) -> int:
+    """栏位实际占用高度：模板基础高度 + 干员行折行的追加行数 ×（字号+行距）。
+
+    chars 行首行基线在 y+120，行高 = chars_font + 8；
+    base 168 只容 1 行干员，折行后按行数追加，供绘制与总高度预算共用。
+    """
+    base = _fmt_slot(fmt, "height", 168)
+    if not slot.chars or not _fmt_slot(fmt, "show_chars", 1):
+        return base
+    chars_font = _load_font(_fmt_slot(fmt, "chars_font", 30))
+    n_lines = len(_wrap_chars_lines(slot.chars, chars_font, content_w))
+    extra = max(0, n_lines - 1) * (_fmt_slot(fmt, "chars_font", 30) + 8)
+    return base + extra
 
 
 def _accent_rgb(cfg: GameConfig) -> tuple[int, int, int]:
@@ -137,11 +193,12 @@ def _draw_slot_card(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
     draw.text((content_x, y + 62), _fit_text(draw, slot.main, main_font, content_w),
               font=main_font, fill=main_color)
 
-    # 行3：干员
+    # 行3：干员（浅色小字，超宽自动折行——不再 _fit_text 硬截断）
     if slot.chars and _fmt_slot(fmt, "show_chars", 1):
         chars_font = _load_font(_fmt_slot(fmt, "chars_font", 30))
-        draw.text((content_x, y + 120), _fit_text(draw, slot.chars, chars_font, content_w),
-                  font=chars_font, fill="#AAB3C2")
+        chars_size = _fmt_slot(fmt, "chars_font", 30)
+        for i, line in enumerate(_wrap_chars_lines(slot.chars, chars_font, content_w)):
+            draw.text((content_x, y + 120 + i * (chars_size + 8)), line, font=chars_font, fill="#AAB3C2")
 
 
 def _draw_game_block(draw: ImageDraw.ImageDraw, x: int, y: int, w: int,
@@ -161,11 +218,11 @@ def _draw_game_block(draw: ImageDraw.ImageDraw, x: int, y: int, w: int,
         draw.text((content_x, y), update.display_title, font=_load_font(_fmt_block(fmt, "version_title_font", 40)), fill="#F5F7FA")
         y += 58
 
-    # 栏位卡片
-    slot_h = _fmt_slot(fmt, "height", 168)
+    # 栏位卡片（槽高随干员折行数自适应，供 y 递增）
     for slot in timeline.slots:
-        _draw_slot_card(draw, x, y, inner_w, slot_h, slot, accent_rgb, content_x, content_w, fmt)
-        y += slot_h + SLOT_GAP
+        _draw_slot_card(draw, x, y, inner_w, _slot_used_height(slot, fmt, content_w),
+                        slot, accent_rgb, content_x, content_w, fmt)
+        y += _slot_used_height(slot, fmt, content_w) + SLOT_GAP
     y -= SLOT_GAP
 
     return y
@@ -181,11 +238,11 @@ def render_card(update: GameUpdate, cfg: GameConfig, timeline: TimelineResult, o
     inner_w = CARD_W - PAD2 * 2
     content_x = PAD2 + 28
     content_w = inner_w - 56
-    slot_h = _fmt_slot(fmt, "height", 168)
 
     header_h = 104
     title_h = 88
-    body_h = slot_h * len(timeline.slots) + SLOT_GAP * max(0, len(timeline.slots) - 1)
+    body_h = sum(_slot_used_height(s, fmt, content_w) for s in timeline.slots) \
+        + SLOT_GAP * max(0, len(timeline.slots) - 1)
     footer_h = 84
     H = header_h + title_h + body_h + footer_h + PAD2 * 2
 
@@ -202,11 +259,12 @@ def render_card(update: GameUpdate, cfg: GameConfig, timeline: TimelineResult, o
     # 版本标题
     draw.text((PAD2, PAD2 + header_h - 16), update.display_title, font=_load_font(40), fill="#F5F7FA")
 
-    # 栏位
+    # 栏位（槽高随干员折行数自适应）
     y = PAD2 + header_h + title_h
     for slot in timeline.slots:
-        _draw_slot_card(draw, PAD2, y, inner_w, slot_h, slot, accent_rgb, content_x, content_w, fmt)
-        y += slot_h + SLOT_GAP
+        used_h = _slot_used_height(slot, fmt, content_w)
+        _draw_slot_card(draw, PAD2, y, inner_w, used_h, slot, accent_rgb, content_x, content_w, fmt)
+        y += used_h + SLOT_GAP
 
     # 底部
     footer_y = H - PAD2 - 30
@@ -247,13 +305,12 @@ def render_summary(entries: list[tuple[GameUpdate, GameConfig, TimelineResult]],
     for _, cfg, tl in entries:
         fmt = load_format(cfg.format)
         block_gap = int(_fmt_block(fmt, "block_gap", 44))
-        slot_h = _fmt_slot(fmt, "height", 168)
         h = 0
         if _fmt_block(fmt, "show_game_name", True):
             h += 44
         if _fmt_block(fmt, "show_version_title", True):
             h += 58
-        h += slot_h * len(tl.slots) + SLOT_GAP * max(0, len(tl.slots) - 1)
+        h += sum(_slot_used_height(s, fmt, content_w) for s in tl.slots) + SLOT_GAP * max(0, len(tl.slots) - 1)
         h += block_gap
         body_h += h
     if entries:

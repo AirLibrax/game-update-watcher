@@ -230,6 +230,27 @@ async def main() -> None:
     check("R8 长名单提取>24字符不截断", "三月七" in half and len(half) > 24,
           f"half={half!r} len={len(half)}")
 
+    # ---------- R9 干员行折行（renderer 折行 + 槽高自适应） ----------
+    from guw_core.renderer import _load_font, _slot_used_height, _wrap_chars_lines  # noqa: E402
+    from guw_core.timeline import TimelineSlot  # noqa: E402
+
+    fmt = json.loads((ROOT / "formats" / "version_based.json").read_text(encoding="utf-8"))
+    content_w = 1080 - 56 * 2 - 56  # 与 renderer 的 inner_w-56 一致
+    long_chars = "新角色：知更鸟·晴歌,风堇；下半池：砂金·戏浪,不死途（9月12日 开放）"
+    lines = _wrap_chars_lines(long_chars, _load_font(30), content_w)
+    check("R9a 折行完整保留字符（不截断）", "".join(lines) == long_chars and len(lines) >= 2,
+          f"lines={len(lines)}")
+    check("R9b 折行在分隔符处断（名字不切半）",
+          len(lines) >= 2 and lines[0].endswith(("；", "，", ",")),
+          f"断点={lines[0][-4:]!r}")
+    slot_long = TimelineSlot(label="x", main="y", date="d", chars=long_chars)
+    slot_short = TimelineSlot(label="x", main="y", date="d", chars="短角色")
+    h_long = _slot_used_height(slot_long, fmt, content_w)
+    h_short = _slot_used_height(slot_short, fmt, content_w)
+    check("R9c 折行槽高自适应递增",
+          h_short == 168 and h_long == 168 + (len(lines) - 1) * 38,
+          f"h_short={h_short} h_long={h_long} lines={len(lines)}")
+
     # 汇总
     print(f"\n===== 离线回归完成: {_PASS} PASS / {_FAIL} FAIL =====")
     if _FAIL:
