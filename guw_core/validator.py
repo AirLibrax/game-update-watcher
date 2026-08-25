@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from guw_core.models import FieldClaim, FieldVerdict, GameConfig
@@ -147,8 +147,11 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
         # 活动/关卡时间："开放时间：08月01日 12:00 - 08月22日 03:59"（关卡）或
         # "活动时间：08月01日 12:00 - 08月29日 03:59"（含商店）
         # 版本结束以关卡时间为准：优先"开放时间"，没有才用"活动时间"
+        # 预告类公告（"即将开启"/"活动预告"）：优先"活动时间"（预告第一段即完整活动期，如复刻 8/22~9/5），
+        # 且活动时间同时映射到 next_activity_start/end（该活动属于"下版本"，供栏位B官方日期与预告升格）
+        is_preview = any(k in title for k in ("即将开启", "活动预告"))
         m_at = None
-        for kw in ("开放时间", "活动时间"):
+        for kw in (("活动时间", "开放时间") if is_preview else ("开放时间", "活动时间")):
             m_at = re.search(
                 rf"{kw}[：:]\s*(\d{{1,2}})月(\d{{1,2}})日[^\n]*?[-—~～]\s*(\d{{1,2}})月(\d{{1,2}})日",
                 content,
@@ -158,16 +161,13 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
         if m_at:
             # 年份取当前年（公告通常年内活动）
             year = datetime.now().year
-            out.append(FieldClaim(
-                "update_time",
-                f"{year}-{int(m_at.group(1)):02d}-{int(m_at.group(2)):02d}",
-                "parse", 1.0, source_url,
-            ))
-            out.append(FieldClaim(
-                "activity_end",
-                f"{year}-{int(m_at.group(3)):02d}-{int(m_at.group(4)):02d}",
-                "parse", 1.0, source_url,
-            ))
+            start_s = f"{year}-{int(m_at.group(1)):02d}-{int(m_at.group(2)):02d}"
+            end_s = f"{year}-{int(m_at.group(3)):02d}-{int(m_at.group(4)):02d}"
+            out.append(FieldClaim("update_time", start_s, "parse", 1.0, source_url))
+            out.append(FieldClaim("activity_end", end_s, "parse", 1.0, source_url))
+            if is_preview:
+                out.append(FieldClaim("next_activity_start", start_s, "parse", 1.0, source_url))
+                out.append(FieldClaim("next_activity_end", end_s, "parse", 1.0, source_url))
         else:
             # 正文没有活动时间，用公告发布日期兜底（displayTime）
             for c in claims:
@@ -373,6 +373,53 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
     for c in known_claims:
         out.append(c)
 
+    return out
+
+
+def extract_preview_claims(item: dict[str, Any], cfg: GameConfig, main_start: date) -> list[FieldClaim]:
+    """预告类条目 → next_* 字段声明（版本名/更新时间/新角色）。
+
+    供 preview_sources 配置的预告池使用（如终末地「X」版本研发通讯、B站官方活动说明动态）：
+    - next_name：标题「版本名」→ 下版本名（「雪凇幽梦」版本研发通讯 → 雪凇幽梦）
+    - next_update_time：正文/动态文本里的斜杠日期 YYYY/MM/DD [HH:MM]，
+      取落在 [主版本更新日 + cycle±10 天] 窗口内的第一个（排除当期活动日期与已过去日期）
+    - next_characters：星级前缀角色（仅预告正文明确写"干员/角色"的场景，防误抓）
+    """
+    out: list[FieldClaim] = []
+    title = item.get("raw_title", "")
+    url = item.get("url", "")
+    contents = [c.value for c in item.get("claims", []) if c.field == "content"]
+    content = "\n".join(_strip_html(c) for c in contents)
+
+    # next_name：标题「」版本名
+    m = re.search(r"[「『]([^」』]{1,20})[」』]", title)
+    if m:
+        name = m.group(1).strip()
+        if name and not any(w in name for w in BAD_CHAR_WORDS) and not re.search(r"[\d*×%]|：|:", name):
+            out.append(FieldClaim("next_name", name, "parse", 1.0, url))
+
+    # next_update_time：斜杠日期 + 版本周期窗口
+    lo = main_start + timedelta(days=cfg.cycle_days - 10)
+    hi = main_start + timedelta(days=cfg.cycle_days + 10)
+    for mm in re.finditer(r"(\d{4})/(\d{1,2})/(\d{1,2})\s*(\d{1,2}:\d{2})?", content):
+        try:
+            d = datetime(int(mm.group(1)), int(mm.group(2)), int(mm.group(3)))
+        except ValueError:
+            continue
+        if lo <= d.date() <= hi:
+            time_s = mm.group(4) or ""
+            out.append(FieldClaim(
+                "next_update_time",
+                f"{d:%Y-%m-%d}" + (f" {time_s}" if time_s else ""),
+                "parse", 1.0, url,
+            ))
+            break
+
+    # next_characters：星级前缀角色
+    for m in RE_CHAR_BANNER.finditer(content):
+        name = m.group(1).strip()
+        if name and not any(w in name for w in BAD_CHAR_WORDS) and not re.search(r"[\d*×%]|：|:", name):
+            out.append(FieldClaim("next_characters", name, "parse", 1.0, url))
     return out
 
 

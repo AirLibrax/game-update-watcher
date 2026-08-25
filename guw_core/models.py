@@ -90,6 +90,7 @@ class GameConfig:
     activity_mode: bool = False # True=活动制（方舟），无版本号，栏位按活动周期展示
     show_link: bool = True      # 卡片是否显示详情链接（方舟去掉）
     known_dates: dict[str, str] = field(default_factory=dict)  # 已官宣的确定时间覆盖，如 {"preview_time": "2026-08-07 19:00"}
+    preview_sources: dict[str, Any] = field(default_factory=dict)  # 预告类公告源 {"title_include": [...]}：命中者进预告池，抽取 next_* 注入主条目（如终末地研发通讯）
     format: str = "version_based"  # 引用 formats/ 下的布局模板名
     aliases: list[str] = field(default_factory=list)  # 指令匹配别名，如 ["终末地", "明日方舟终末地"]
 
@@ -117,6 +118,7 @@ class GameConfig:
             activity_mode=bool(d.get("activity_mode", False)),
             show_link=bool(d.get("show_link", True)),
             known_dates=dict(d.get("known_dates", {})),
+            preview_sources=dict(d.get("preview_sources", {})),
             format=str(d.get("format", "version_based")),
             aliases=list(d.get("aliases", [])),
         )

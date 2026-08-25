@@ -164,8 +164,10 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
         half_date = f"{fmt_date(official_half)} 开启"
         half_est = False
     else:
-        half_date = f"{fmt_date(start + timedelta(days=half))} 开启"
-        half_est = True
+        half_day = start + timedelta(days=half)
+        half_date = f"{fmt_date(half_day)} 开启"
+        # 已兑现的日期不再标预估（日期已过即成事实）
+        half_est = half_day > today
 
     if has_preview and parse_date(update.field_value("preview_time")):
         p = parse_date(update.field_value("preview_time"))
@@ -174,10 +176,10 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
     elif next_known:
         # 下版本时间官方确定，但前瞻=下版本-7天只是惯例推算，需标预估
         preview_text = f"{fmt_date(preview_date)} 前后"
-        preview_est = True
+        preview_est = preview_date > today
     else:
         preview_text = f"{fmt_date(preview_date)} 前后"
-        preview_est = True
+        preview_est = preview_date > today
 
     if stage == 1:
         # 刚开版本：上下半池
@@ -224,7 +226,8 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
             next_title,
             f"{fmt_date(next_start)}" if next_known else f"约 {fmt_date(next_start)}",
             next_chars,
-            estimated=not next_known,
+            # 官方值不标预估；推算值已过也不标（日期已兑现为事实）
+            estimated=(not next_known) and next_start > today,
         ))
     else:
         # 第 6 周：下版本时间 + 下版本上半池（本版本角色仍显示）
@@ -234,13 +237,13 @@ def build_timeline(update: GameUpdate, cfg: GameConfig, today: date | None = Non
             next_title,
             f"{fmt_date(next_start)}" if next_known else f"约 {fmt_date(next_start)}",
             next_chars,
-            estimated=not next_known,
+            estimated=(not next_known) and next_start > today,
         ))
         slots.append(TimelineSlot(
             "下版本·上半池",
             "上半池",
             f"{fmt_date(next_start)} 开启" if next_known else f"约 {fmt_date(next_start)} 开启",
-            estimated=not next_known,
+            estimated=(not next_known) and next_start > today,
         ))
 
     note = "确定信息来自官方公告，其余按 6 周周期推算"
@@ -286,13 +289,23 @@ def _activity_timeline(update: GameUpdate, cfg: GameConfig, start: date, today: 
         a_chars,
     )]
 
-    # 栏位B：下版本（官方公布才写开启日期，否则写待公布）
+    # 栏位B：下版本（官方公布才写开启日期，否则写待公布/周期推算）
     next_name = update.field_value("next_activity")
     next_is_reprint = bool(update.field_value("next_is_reprint"))
     if next_name:
         label = "下版本"
         main_text = f"复刻·{next_name}" if next_is_reprint else f"「{next_name}」"
-        slots.append(TimelineSlot(label, main_text, f"约 {fmt_date(next_start)} 开启", estimated=True))
+        # 官方预告时间（预告公告正文活动时间）优先，无则周期推算
+        na_start = parse_date(update.field_value("next_activity_start"))
+        na_end = parse_date(update.field_value("next_activity_end"))
+        if na_start:
+            if na_end:
+                slots.append(TimelineSlot(label, main_text, f"{fmt_date(na_start)} ~ {fmt_date(na_end)}"))
+            else:
+                slots.append(TimelineSlot(label, main_text, f"{fmt_date(na_start)} 开启"))
+        else:
+            # 推算值已过也不标预估（日期已兑现为事实，同 build_timeline 约定）
+            slots.append(TimelineSlot(label, main_text, f"约 {fmt_date(next_start)} 开启", estimated=next_start > today))
     else:
         slots.append(TimelineSlot("下版本", "未知"))
 

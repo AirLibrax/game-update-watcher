@@ -17,10 +17,18 @@
   },
   "fields": ["version_name", "update_time", "characters"],
   "version_pattern": "「(?P<name>.+?)」版本更新说明",
-  "title_include": ["版本更新说明", "版本更新公告", "前瞻"],
+  "title_include": ["版本更新说明", "版本更新公告"],
   "title_exclude": ["封禁", "特卖", "申领", "征集", "测试", "网页活动"],
+  "preview_sources": {
+    "title_include": ["研发通讯", "前瞻", "活动说明"]
+  },
   "cycle_days": 42,
   "half_days": 21,
   "preview_ahead_days": 7,
+  "known_dates": {
+    "next_name": "雪凇幽梦",
+    "next_update_time": "2026-08-26",
+    "next_characters": "伊冯"
+  },
   "groups": []
 }

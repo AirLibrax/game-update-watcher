@@ -19,7 +19,7 @@
   "fields": ["version_name", "update_time", "characters"],
   "version_pattern": "",
   "title_include": ["SideStory", "夏日嘉年华", "限定寻访", "故事集", "制作组通讯", "复刻", "活动"],
-  "title_exclude": ["时装", "周边", "皮肤", "模组", "战绩", "签到", "充值", "掉落", "修复", "维护补偿", "创作征集", "网页活动", "应援", "上架", "复刻上架", "特限模组"],
+  "title_exclude": ["时装", "周边", "皮肤", "模组", "战绩", "签到", "充值", "掉落", "修复", "维护补偿", "创作征集", "网页活动", "应援", "上架", "复刻上架", "特限模组", "历程报告"],
   "activity_mode": true,
   "cycle_days": 28,
   "show_link": false,
