@@ -335,11 +335,12 @@ class GameUpdatePlugin(MaiBotPlugin):
             main = s.get("main")
             m = "✓" if main == "ok" else ("✗" if main == "fail" else "·")
             bili = s.get("bili")
+            name = getattr(gc, "short", "") or gc.display
             if bili is None:
-                parts.append(f"{gc.short}{m}")
+                parts.append(f"{name}{m}")
             else:
                 b = "站✓" if bili == "ok" else ("站~" if bili == "empty" else "站✗")
-                parts.append(f"{gc.short}{m}{b}")
+                parts.append(f"{name}{m}{b}")
         return "数据源 " + " ".join(parts) if parts else ""
 
     # ---------- 核心：采集 + 渲染 + 发送到指定聊天流 ----------

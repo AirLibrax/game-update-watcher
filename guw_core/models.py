@@ -93,6 +93,7 @@ class GameConfig:
     preview_sources: dict[str, Any] = field(default_factory=dict)  # 预告类公告源 {"title_include": [...]}：命中者进预告池，抽取 next_* 注入主条目（如终末地研发通讯）
     format: str = "version_based"  # 引用 formats/ 下的布局模板名
     aliases: list[str] = field(default_factory=list)  # 指令匹配别名，如 ["终末地", "明日方舟终末地"]
+    short: str = ""          # 短名（状态行用），如 "崩铁"；空则回退 display
 
     @classmethod
     def from_dict(cls, key: str, d: dict[str, Any]) -> "GameConfig":
@@ -104,6 +105,7 @@ class GameConfig:
         return cls(
             key=key,
             display=d.get("display", key),
+            short=str(d.get("short", "") or ""),
             theme_color=d.get("theme_color", "#3B82F6"),
             adapter=d["adapter"],
             adapter_params=d.get("adapter_params", {}),
