@@ -20,8 +20,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from core.models import GameConfig, GameUpdate
-from core.timeline import TimelineResult
+from guw_core.models import GameConfig, GameUpdate
+from guw_core.timeline import TimelineResult
 
 CARD_W = 1080
 PAD = 56

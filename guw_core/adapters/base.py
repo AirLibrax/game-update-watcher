@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from core.models import FieldClaim
+from guw_core.models import FieldClaim
 
 
 class FetchError(Exception):

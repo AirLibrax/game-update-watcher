@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from core.models import FieldClaim, FieldVerdict, GameConfig
+from guw_core.models import FieldClaim, FieldVerdict, GameConfig
 
 # ---------- 通用时间/内容提取正则 ----------
 

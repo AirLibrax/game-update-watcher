@@ -22,8 +22,8 @@ from typing import Any
 
 import httpx
 
-from core.adapters.base import BaseAdapter
-from core.models import FieldClaim
+from guw_core.adapters.base import BaseAdapter
+from guw_core.models import FieldClaim
 
 # wbi mixin key 打乱表（B站前端固定算法，公开）
 _MIXIN_KEY_ENC_TAB = [

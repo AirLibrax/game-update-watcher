@@ -31,14 +31,25 @@ from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 from typing import Literal
 
 
-class PluginConfig(PluginConfigBase):
-    """插件配置：WebUI 设置页模型。
+class PluginSection(PluginConfigBase):
+    """插件配置节（对应 config.toml 的 [plugin]）。
 
     tracked_games 用 Literal 生成多选框；新增游戏时在此处同步加一个 key。
     """
 
-    __ui_label__ = "游戏更新速报设置"
+    __ui_label__ = "游戏更新速报"
+    __ui_order__ = 0
 
+    enabled: bool = Field(
+        default=True,
+        description="是否启用插件",
+        json_schema_extra={"label": "启用插件"},
+    )
+    config_version: str = Field(
+        default="2.0.0",
+        description="配置版本（MaiBot 用于配置自动迁移，勿手动修改）",
+        json_schema_extra={"label": "配置版本"},
+    )
     tracked_games: list[Literal["wuwa", "arknights", "endfield", "zzz", "hsr"]] = Field(
         default_factory=list,
         description="要跟踪的游戏（留空=全部，可多选）",
@@ -61,17 +72,23 @@ class PluginConfig(PluginConfigBase):
     )
 
 
+class PluginConfig(PluginConfigBase):
+    """插件完整配置：外层 plugin 节包裹（MaiBot 配置模型规范）。"""
+
+    plugin: PluginSection = Field(default_factory=PluginSection)
+
+
 try:
-    from core.pipeline import UpdatePipeline
-    from core.renderer import render_card, render_summary
-    from core.store import PublishStore
-    from core.timeline import build_timeline
+    from guw_core.pipeline import UpdatePipeline
+    from guw_core.renderer import render_card, render_summary
+    from guw_core.store import PublishStore
+    from guw_core.timeline import build_timeline
 except ImportError:
     # 按包方式加载时的相对导入回退
-    from .core.pipeline import UpdatePipeline
-    from .core.renderer import render_card, render_summary
-    from .core.store import PublishStore
-    from .core.timeline import build_timeline
+    from .guw_core.pipeline import UpdatePipeline
+    from .guw_core.renderer import render_card, render_summary
+    from .guw_core.store import PublishStore
+    from .guw_core.timeline import build_timeline
 
 
 def _load_config_file(plugin_dir: Path) -> dict:
@@ -109,7 +126,8 @@ def _load_config_file(plugin_dir: Path) -> dict:
 def _coerce_config(cfg: dict) -> dict:
     """把 configparser 读出的字符串值转成正确类型（tomllib 分支无需此步）。"""
     bool_keys = ("enabled", "scheduled_enabled", "debug", "show_pending_fields")
-    int_keys = ("poll_interval_minutes", "publish_threshold", "http_timeout_seconds")
+    int_keys = ("poll_interval_minutes", "http_timeout_seconds")
+    float_keys = ("publish_threshold",)
     for section in cfg.values():
         if not isinstance(section, dict):
             continue
@@ -123,10 +141,12 @@ def _coerce_config(cfg: dict) -> dict:
                 try:
                     section[k] = int(v)
                 except ValueError:
-                    try:
-                        section[k] = float(v)
-                    except ValueError:
-                        pass
+                    pass
+            elif k in float_keys:
+                try:
+                    section[k] = float(v)
+                except ValueError:
+                    pass
             elif v.strip().startswith("["):
                 # 简易列表解析：["a", "b"]
                 try:

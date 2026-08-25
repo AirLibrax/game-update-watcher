@@ -10,8 +10,8 @@ import html as html_mod
 import re
 from typing import Any
 
-from core.adapters.base import BaseAdapter, fetch_json
-from core.models import FieldClaim
+from guw_core.adapters.base import BaseAdapter, fetch_json
+from guw_core.models import FieldClaim
 
 
 def strip_html(s: str) -> str:

@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from core.models import GameConfig, GameUpdate
+from guw_core.models import GameConfig, GameUpdate
 
 # ---------- 栏位数据结构 ----------
 

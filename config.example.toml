@@ -3,6 +3,9 @@
 # config.toml 已被 .gitignore 排除，不会提交到 Git，避免配置冲突
 
 [plugin]
+# 配置版本号（MaiBot 要求，用于配置自动迁移；实际部署时由 Runner 自动生成/维护）
+config_version = "2.0.0"
+
 enabled = true
 
 # 要跟踪的游戏（games/*.json 的文件名列表，如 ["wuwa", "hsr"]）

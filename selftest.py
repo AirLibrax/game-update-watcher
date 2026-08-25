@@ -13,10 +13,10 @@ import asyncio
 import sys
 from pathlib import Path
 
-from core.models import GameConfig
-from core.pipeline import UpdatePipeline
-from core.renderer import render_card, render_summary
-from core.timeline import build_timeline
+from guw_core.models import GameConfig
+from guw_core.pipeline import UpdatePipeline
+from guw_core.renderer import render_card, render_summary
+from guw_core.timeline import build_timeline
 
 OUT_DIR = Path("_selftest_out")
 

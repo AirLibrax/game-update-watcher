@@ -12,10 +12,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.adapters import create_adapter
-from core.models import FieldVerdict, GameConfig, GameUpdate
-from core.store import PublishStore
-from core.validator import aggregate, extract_fields
+from guw_core.adapters import create_adapter
+from guw_core.models import FieldVerdict, GameConfig, GameUpdate
+from guw_core.store import PublishStore
+from guw_core.validator import aggregate, extract_fields
 
 
 class UpdatePipeline:

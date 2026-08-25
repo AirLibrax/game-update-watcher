@@ -13,8 +13,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from core.adapters.base import BaseAdapter, fetch_text
-from core.models import FieldClaim
+from guw_core.adapters.base import BaseAdapter, fetch_text
+from guw_core.models import FieldClaim
 
 
 def _strip_html(s: str) -> str:

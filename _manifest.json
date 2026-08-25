@@ -25,7 +25,7 @@
   },
   "dependencies": [],
   "plugin_type": "integration",
-  "capabilities": ["send", "chat", "config"],
+  "capabilities": ["send.image", "chat.open_session"],
   "display": {
     "icon": {
       "type": "lucide",

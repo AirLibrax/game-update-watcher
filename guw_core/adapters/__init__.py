@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from core.adapters.base import BaseAdapter
-from core.adapters.bili_dynamic import BiliDynamicAdapter
-from core.adapters.hg_json import HgJsonAdapter
-from core.adapters.hg_ssr import HgSsrAdapter
-from core.adapters.kuro import KuroJsonAdapter
-from core.adapters.mihoyo import MihoyoJsonAdapter
+from guw_core.adapters.base import BaseAdapter
+from guw_core.adapters.bili_dynamic import BiliDynamicAdapter
+from guw_core.adapters.hg_json import HgJsonAdapter
+from guw_core.adapters.hg_ssr import HgSsrAdapter
+from guw_core.adapters.kuro import KuroJsonAdapter
+from guw_core.adapters.mihoyo import MihoyoJsonAdapter
 
 ADAPTERS: dict[str, type[BaseAdapter]] = {
     "mihoyo_json": MihoyoJsonAdapter,

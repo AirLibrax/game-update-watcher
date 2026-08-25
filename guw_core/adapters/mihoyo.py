@@ -10,8 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from core.adapters.base import BaseAdapter, fetch_json
-from core.models import FieldClaim
+from guw_core.adapters.base import BaseAdapter, fetch_json
+from guw_core.models import FieldClaim
 
 
 class MihoyoJsonAdapter(BaseAdapter):
