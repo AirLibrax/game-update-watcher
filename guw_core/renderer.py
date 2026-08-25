@@ -278,14 +278,11 @@ def render_summary(entries: list[tuple[GameUpdate, GameConfig, TimelineResult]],
         y = _draw_game_block(draw, PAD2, y, inner_w, update, cfg, tl, content_x, content_w, fmt)
         y += int(_fmt_block(fmt, "block_gap", 44))
 
-    # 底部注释
+    # 底部：数据源状态行 + 生成信息（来源已由各栏位小标表达，不再重复画旧 note）
     footer_y = H - PAD2 - 34
     if status_line:
         draw.text((PAD2, footer_y - 34), _fit_text(draw, status_line, _load_font(24), inner_w - 60),
                   font=_load_font(24), fill="#5B6472")
-    note = "确定信息来自官方公告，预估为周期推算"
-    draw.text((PAD2, footer_y), _fit_text(draw, note, _load_font(24), inner_w - 260),
-              font=_load_font(24), fill="#5B6472")
     info = "由 game-update-watcher 生成"
     if watermark:
         info += f" · {watermark}"

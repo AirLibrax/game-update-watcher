@@ -169,13 +169,21 @@ class UpdatePipeline:
 
         # 版本制：新旧版本更新说明并存时只保留"最新已开始"的主条目（防汇总图同一游戏双块）
         # 例：崩铁 4.5 上线后，4.4 与 4.5 更新说明同时在候选池 → 取 update_time 最新且 ≤ today 者
+        # B-M4 修复：update_time 为空的条目（无锚点）不参与 "≤ today" 比较（空串恒 ≤ 任何日期）
         if updates and not cfg.activity_mode and len(updates) > 1:
-            started = [u for u in updates if (u.field_value("update_time") or "")[:10] <= today_s]
+
+            def _anchor(u: GameUpdate) -> str:
+                return (u.field_value("update_time") or "")[:10]
+
+            started = [u for u in updates if _anchor(u) and _anchor(u) <= today_s]
             if started:
-                updates = [max(started, key=lambda u: u.field_value("update_time"))]
+                updates = [max(started, key=_anchor)]
             else:
-                # 全部未开始（异常：未来版本的说明先于当期出现）→ 取最早者
-                updates = [min(updates, key=lambda u: u.field_value("update_time"))]
+                anchored = [u for u in updates if _anchor(u)]
+                if anchored:
+                    # 全部未开始（异常：未来版本的说明先于当期出现）→ 取有锚点的最早者
+                    updates = [min(anchored, key=_anchor)]
+                # 全无锚点（异常：均无 update_time）→ 保留原候选顺序，不做筛选
 
         # 认证源匹配：优先按活动名匹配，没有活动名再按版本号
         for auth in auth_items:
@@ -219,10 +227,15 @@ class UpdatePipeline:
             )
 
         # known_dates 生命周期：版本切换后，仍指向"当前版本"的 next_* 与旧前瞻时间不再注入
-        # 例：4.5 上线后 known_dates 的 next_version=4.5 == 主条目版本号 → 清理，防止旧值冒充下版本
+        # 例1：4.5 上线后 known_dates 的 next_version=4.5 == 主条目版本号 → 清理
+        # 例2：无版本号游戏（终末地）版本切换后 known next_name == 主条目版本名 → 同样清理（自指残留）
         if updates and not cfg.activity_mode:
             up = updates[0]
-            if up.version_num and up.field_value("next_version") == up.version_num:
+            stale_known = (
+                (up.version_num and up.field_value("next_version") == up.version_num)
+                or (up.field_value("next_name") == up.version_name)
+            )
+            if stale_known:
                 for f in ("next_name", "next_version", "next_characters", "preview_time"):
                     up.fields.pop(f, None)
 
@@ -283,13 +296,14 @@ class UpdatePipeline:
             # 后处理：上半名单剔除已归入下半池的角色。
             # known_dates 兑底值走聚合通道（高权重）不经过上方注入过滤，
             # 可能与自动提取的 next_half_characters 重叠（如同角色同时出现在新角色与下半池）。
+            # 剔除后可能为空（B站风控时只剩 known 兜底且恰属下半池）→ 同样清空，避免"新角色：伊冯；下半池：伊冯"重复
             _half_v = main_upd.field_value("next_half_characters")
             _up_field = main_upd.fields.get("next_characters")
-            if _half_v and _up_field:
+            if _half_v and _up_field and _up_field.value:
                 _half_set = {n.strip() for n in _half_v.split(",") if n.strip()}
                 _names = [n.strip() for n in _up_field.value.split(",") if n.strip()]
                 _filtered = [n for n in _names if n not in _half_set]
-                if _filtered != _names and _filtered:
+                if _filtered != _names:
                     main_upd.fields["next_characters"] = FieldVerdict(
                         field="next_characters", value=",".join(_filtered),
                         confidence=_up_field.confidence, sources=_up_field.sources,

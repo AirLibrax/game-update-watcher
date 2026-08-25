@@ -28,7 +28,7 @@ for _p in (_PLUGIN_DIR, _PLUGIN_PARENT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk import CONFIG_RELOAD_SCOPE_SELF, Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 from typing import Literal
 
 
@@ -265,20 +265,55 @@ class GameUpdatePlugin(MaiBotPlugin):
             self.ctx.logger.info("game-update-watcher 定时轮询未启用，使用 Tool/命令按需触发")
 
     async def on_unload(self) -> None:
-        if self._task:
+        if self._task is not None:
             self._task.cancel()
-        if hasattr(self, "_store"):
+        # B-H1 修复：on_load 依赖缺失时 _store 为 None，跳过 close 避免卸载崩溃
+        if self._store is not None:
             self._store.close()
 
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
-        # 配置热更新：优先用 SDK 传入的新配置，失败回退读文件
+        """配置热更新（重写：scope 过滤 + 全量状态同步，见 A-S1/B-M1 审查项）。
+
+        - scope 过滤：只处理插件自身 config.toml（scope=self）；bot/model 全局广播不污染本插件配置
+        - 重建 self._games（tracked_games 热更生效）
+        - 重新接线 llm_fallback（开关热更生效）
+        - 同步定时轮询任务状态（scheduled_enabled false↔true）
+        """
         del version
+        if scope != CONFIG_RELOAD_SCOPE_SELF:
+            return  # bot/model 广播与本插件无关
         if isinstance(config_data, dict) and config_data:
             self._cfg = config_data
         else:
             self._cfg = _coerce_config(_load_config_file(Path(__file__).resolve().parent))
         self._cfg_plugin = self._cfg.get("plugin", {}) if isinstance(self._cfg.get("plugin"), dict) else self._cfg
-        self.ctx.logger.info("game-update-watcher 配置已热更新")
+
+        # 重建跟踪游戏集合
+        try:
+            all_games = self._pipeline.load_games(Path(__file__).parent / "games") if self._pipeline is not None else {}
+        except Exception as e:
+            self.ctx.logger.warning("配置热更新：games 重载失败（%s），保留旧集合", e)
+            all_games = None
+        if all_games is not None:
+            tracked = self._cfg_plugin.get("tracked_games", []) or []
+            self._games = {k: v for k, v in all_games.items() if k in tracked} if tracked else all_games
+
+        # llm_fallback 重接线
+        if self._pipeline is not None:
+            self._pipeline.llm_fallback = self._llm_fallback if self._cfg_plugin.get("llm_fallback_enabled", False) else None
+
+        # 定时轮询状态同步
+        want_poll = bool(self._cfg_plugin.get("scheduled_enabled", False))
+        if want_poll and (self._task is None or self._task.done()):
+            poll_min = int(self._cfg_plugin.get("poll_interval_minutes", 360) or 360)
+            self._task = asyncio.create_task(self._poll_loop(poll_min))
+            self.ctx.logger.info("配置热更新：定时轮询已启用，间隔 %s 分钟", poll_min)
+        elif not want_poll and self._task is not None and not self._task.done():
+            self._task.cancel()
+            self._task = None
+            self.ctx.logger.info("配置热更新：定时轮询已停用")
+
+        self.ctx.logger.info("game-update-watcher 配置已热更新（scope=%s）", scope)
 
     # ---------- 触发入口 ----------
 
@@ -452,15 +487,18 @@ class GameUpdatePlugin(MaiBotPlugin):
     # ---------- 定时轮询（可选） ----------
 
     async def _poll_loop(self, interval_minutes: int) -> None:
-        await self._run_once()
+        # B-M(审查) 修复：首次 _run_once 亦在 try 内，异常记日志后继续循环（任务不死亡）
         while True:
             try:
-                await asyncio.sleep(interval_minutes * 60)
                 await self._run_once()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 self.ctx.logger.exception("game-update-watcher 轮询异常: %s", e)
+            try:
+                await asyncio.sleep(interval_minutes * 60)
+            except asyncio.CancelledError:
+                raise
 
     async def _run_once(self) -> None:
         cfg_plugin = self._cfg_plugin

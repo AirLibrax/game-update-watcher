@@ -317,9 +317,9 @@ def _activity_timeline(update: GameUpdate, cfg: GameConfig, start: date, today: 
         # 兼容兜底：事件列表缺失时按旧字段渲染单栏（理论上 P1-1 后不会触发）
         return _activity_timeline_legacy(update, start, today)
     if not events:
-        # 合法空窗：无任何事件（含 roadmap）
+        # 合法空窗：无任何事件（含 roadmap）；来源小标中性（非官方值也非推算）
         return TimelineResult(
-            slots=[TimelineSlot("本版本", "暂无活动", "等待官方公告", source="estimate")],
+            slots=[TimelineSlot("本版本", "暂无活动", "等待官方公告", source="")],
             note="暂无进行中活动，等待官方公告",
         )
 
@@ -365,8 +365,8 @@ def _activity_timeline(update: GameUpdate, cfg: GameConfig, start: date, today: 
                 f"{_fmt_ev(me['start'])} 开启", source="official",
             ))
         else:
-            # 空窗期：无进行中、无预告
-            slots.append(TimelineSlot("本版本", "暂无活动", "等待官方公告", source="estimate"))
+            # 空窗期：无进行中、无预告；来源小标中性
+            slots.append(TimelineSlot("本版本", "暂无活动", "等待官方公告", source=""))
         others = []
 
     # 栏位B：并行活动 > roadmap 官方预告 > 未知

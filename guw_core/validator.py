@@ -37,8 +37,9 @@ RE_CHAR_BANNER = re.compile(
 RE_CHARS = re.compile(r"[「『]([^」』]{1,12})[」』]")
 
 # 下半池角色：如 "刻律德菈、那刻夏与砂金则将于下半回归跃迁" / "将于版本下半登场"
+# 审查修复：捕获上限 24→60，防长名单截断；BAD_CHAR_WORDS 与后续逐名长度过滤保留防误抓
 RE_HALF_CHAR = re.compile(
-    r"([\u4e00-\u9fff·、]{2,24}?)(?:则)?(?:将)?于(?:版本)?下半(?:期)?(?:回归|复刻|登场|开启|跃迁|活动)"
+    r"([\u4e00-\u9fff·、和与]{2,60}?)(?:则)?(?:将)?于(?:版本)?下半(?:期)?(?:回归|复刻|登场|开启|跃迁|活动)"
 )
 BAD_CHAR_WORDS = (
     "维护", "更新", "补偿", "时间", "活动", "版本", "前瞻", "直播",
@@ -153,7 +154,12 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
             #   - 预告类公告（"即将开启"/"活动预告"）：优先"活动时间"（预告第一段即完整活动期含商店，
             #     如墟复刻 8/22~9/5）→ 驱动栏位B官方日期与预告升格
             # 改动此语义会破坏"酸橙 8/22 结束 / 墟 9/5 结束"的既有验收基准
-            is_preview = any(k in title for k in ("即将开启", "活动预告"))
+            # 审查修复（C-M2）：预告判定兼容插值形态——"即将于8月22日04:00开启"/"即将X月X日开启"
+            # 等日期插入变体（B站动态文本常见）；"活动预告/复刻预告"字样亦算预告
+            title_flat = re.sub(r"\s+", "", title)
+            is_preview = ("即将" in title_flat and "开启" in title_flat) or any(
+                k in title_flat for k in ("活动预告", "复刻预告")
+            )
             m_at = None
             for kw in (("活动时间", "开放时间") if is_preview else ("开放时间", "活动时间")):
                 m_at = re.search(
@@ -406,7 +412,8 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
     if source_url:
         out.append(FieldClaim("link", source_url, "parse", 1.0, source_url))
 
-    # 7. 已知确定时间覆盖：追加到末尾，aggregate 按权重取最高（known=1.0 与 parse 持平，但排在后面会被归一化去重）
+    # 7. 已知确定时间覆盖：追加到末尾，aggregate 按权重取最高。
+    #    注意：known 权重 1.5（非 1.0）——保证 aggregate 必选 known 值，而非依赖插入顺序
     for c in known_claims:
         out.append(c)
 
@@ -549,6 +556,10 @@ def aggregate(claims: list[FieldClaim], publish_threshold: float) -> dict[str, F
                      "start_time", "end_time", "start_time_ms", "end_time_ms", "publish_time_ms"):
             continue
         if field in ("characters", "half_characters"):
+            # 【裁定·文档化】角色字段并集合并是有意特性（保信息完整）：
+            # known 兜底值与自动抽取值不冲突即并存（不因 known 高权重丢弃自动值）；
+            # 冲突去重（如同一角色同时出现在上半新角色与下半池）由 pipeline 的
+            # 上半/下半差集剔除后处理负责，避免重复展示。
             seen_vals: list[str] = []
             for c in fs:
                 v = c.value.strip()

@@ -2,7 +2,7 @@
 """game-update-watcher 一键验证（跨平台，不依赖 PowerShell 语法）。
 
 用法: python verify.py
-执行四步检查: 环境 -> 语法 -> 配置 -> 真实采集+出图
+执行五步检查: 环境 -> 语法 -> 配置 -> 真实采集+出图 -> 离线回归
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def main() -> int:
         except Exception:
             pass
 
-    print("\n========== 1/4 环境检查 ==========")
+    print("\n========== 1/5 环境检查 ==========")
 
     # Python 版本
     ver = sys.version_info
@@ -57,7 +57,7 @@ def main() -> int:
         import PIL
         report(True, f"httpx {httpx.__version__} / pillow {PIL.__version__}")
 
-    print("\n========== 2/4 语法检查 ==========")
+    print("\n========== 2/5 语法检查 ==========")
     py_files = sorted(ROOT.rglob("*.py"))
     bad = []
     for f in py_files:
@@ -67,7 +67,7 @@ def main() -> int:
             bad.append(f"{f.name}: {e}")
     report(not bad, f"{len(py_files)} 个 .py 文件语法通过" if not bad else f"语法错误: {'; '.join(bad)}")
 
-    print("\n========== 3/4 配置检查 ==========")
+    print("\n========== 3/5 配置检查 ==========")
     json_files = sorted((ROOT / "games").glob("*.json"))
     bad_json = []
     for f in json_files:
@@ -91,12 +91,16 @@ def main() -> int:
             pass
     report(not bad_json, f"{len(json_files)} 个游戏配置 + {len(fmt_files)} 个格式模板可解析" if not bad_json else f"配置错误: {'; '.join(bad_json)}")
 
-    print("\n========== 4/4 真实采集测试（联网，约 10~30 秒） ==========")
+    print("\n========== 4/5 真实采集测试（联网，约 10~30 秒） ==========")
     os.chdir(ROOT)
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.run([sys.executable, str(ROOT / "selftest.py")], env=env)
     report(proc.returncode == 0, "selftest.py 执行完成")
+
+    print("\n========== 5/5 离线回归测试（tests/，零网络依赖） ==========")
+    proc = subprocess.run([sys.executable, str(ROOT / "tests" / "test_core.py")], env=env)
+    report(proc.returncode == 0, "tests/test_core.py 离线回归通过")
 
     print("\n========== 汇总 ==========")
     if FAIL:
