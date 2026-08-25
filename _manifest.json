@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.airlibrax.game-update-watcher",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "name": "游戏更新速报",
   "description": "定时采集多款游戏版本更新信息（鸣潮/明日方舟/终末地/绝区零/崩铁），字段级交叉认证后按 6 周版本节奏生成汇总图，推送到指定 QQ 群。新增游戏只需写一个 JSON 配置。",
   "author": {
