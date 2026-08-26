@@ -33,6 +33,14 @@ RE_PREVIEW = re.compile(
 RE_CHAR_BANNER = re.compile(
     r"(?:★{1,6}|\d\s*星|五星|四星|S级|A级)\s*(?![^「』【】]{0,6}?(?:光锥|武器|音擎|遗器))\s*(?:共鸣者|角色|干员|代理人|特勤|英雄|邦布)?\s*[「『\[【]?\s*([^」』\]「『【】\s,，、:：/（）()\n]{1,12})\s*[」』\]】]?"
 )
+# 0.5.4 线上噪音修复：鸣潮 kuro 分支专用收紧版——开/闭括号均必选。
+# 「角色时」伪角色根因：宽松版闭括号可选，把功能描述句
+# "通过10连唤取获得5星共鸣者角色时，可切换至该角色的专属展示页" 的"角色时"吞为角色。
+# 影响面评估：只收紧 kuro——zzz 存在 "[蕾米埃尔(流明·异常)]"（左括号后紧贴半角括号，非成对）形态，
+# 全局收紧会丢 zzz 角色；米哈游/终末地正例（「姬子…」/【诀】）自带成对括号，宽松版已够稳。
+RE_CHAR_BANNER_STRICT = re.compile(
+    r"(?:★{1,6}|\d\s*星|五星|四星|S级|A级)\s*(?![^「』【】]{0,6}?(?:光锥|武器|音擎|遗器))\s*(?:共鸣者|角色|干员|代理人|特勤|英雄|邦布)?\s*[「『\[【]\s*([^」』\]「『【】\s,，、:：/（）()\n]{1,12})\s*[」』\]】]"
+)
 # 兜底：正文里的「xxx」词组（排除明显不是角色的）
 RE_CHARS = re.compile(r"[「『]([^」』]{1,12})[」』]")
 
@@ -362,7 +370,8 @@ def extract_fields(item: dict[str, Any], cfg: GameConfig) -> list[FieldClaim]:
                 if 2 <= len(name) <= 8:
                     char_names.append(name)
         else:
-            for m in RE_CHAR_BANNER.finditer(content):
+            # 库洛（鸣潮）：全文跑 STRICT 版（开闭括号必选）——功能描述句不再产生伪角色（0.5.4）
+            for m in RE_CHAR_BANNER_STRICT.finditer(content):
                 name = m.group(1).strip()
                 if name and not any(w in name for w in BAD_CHAR_WORDS) and not re.search(r"[\d*×%]|：|:", name):
                     char_names.append(name)

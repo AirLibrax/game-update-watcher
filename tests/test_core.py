@@ -316,6 +316,24 @@ async def main() -> None:
           u.fields["next_update_time"].sources == ["parse"] and u.field_value("next_update_time").startswith("2026-09-02"),
           f"src={u.fields['next_update_time'].sources} val={u.field_value('next_update_time')!r}")
 
+    # ---------- R12 「角色时」伪角色修复（0.5.4：kuro 分支开闭括号必选） ----------
+    wuwa_cfg = GameConfig.from_dict("wuwa", {
+        "display": "鸣潮", "theme_color": "#3B82F6", "format": "version_based",
+        "adapter": "kuro_json", "adapter_params": {}, "cycle_days": 35,
+        "version_pattern": "「(?P<name>.+?)」(?P<num>[\\d.]+)版本内容",
+        "title_include": ["版本内容"],
+    })
+    wuwa_item = item("「蜃云灯影，凡尘剑心」3.6版本内容介绍如下",
+                     "★全新角色★\n5星共鸣者「清宵」（气动 | 迅刀）\n"
+                     "- 通过10连唤取获得5星共鸣者角色时，可切换至该角色的专属展示页进行分享。\n"
+                     "5星共鸣者「景燃」（热熔 | 长刃）",
+                     source="kuro_json")
+    u = (await pl.build_updates(wuwa_cfg, [wuwa_item], 0.8))[0]
+    chars = u.field_value("characters")
+    check("R12a 功能描述句不产生伪角色「角色时」", "角色时" not in chars, f"chars={chars!r}")
+    check("R12b 括号形态正例正常提取（清宵/景燃）",
+          "清宵" in chars and "景燃" in chars, f"chars={chars!r}")
+
     # 汇总
     print(f"\n===== 离线回归完成: {_PASS} PASS / {_FAIL} FAIL =====")
     if _FAIL:
