@@ -36,6 +36,18 @@ RE_CHAR_BANNER = re.compile(
 # 兜底：正文里的「xxx」词组（排除明显不是角色的）
 RE_CHARS = re.compile(r"[「『]([^」』]{1,12})[」』]")
 
+# 版本更新时间提取的语义上下文词（线上修复 0.5.3）：
+# next_update_time 的斜杠日期必须临近这些词（版本更新/更新维护等），否则视为"纯活动时间"拒绝映射
+VERSION_CTX_WORDS = ("版本更新", "更新维护", "维护更新", "版本上线", "停机维护")
+
+# 0.5.3 追加（用户实测三条误源）：活动类公告标题——预热/配套活动动态只贡献 characters，
+# 不产 next_update_time（"「深林覆雪」限时签到活动说明"等）
+ACTIVITY_ANN_WORDS = ("活动说明", "开启说明", "签到", "补给", "通行证", "任务说明")
+
+# 区间右端模式：时间后紧跟 "版本更新维护前/截止/结束/为止" → 该时间是活动区间左端（活动持续到版本维护前），
+# 不是版本更新时刻（陷阱：「理智补给」「深林覆雪」「协议通行证」三条正文均含"版本更新维护前"字样）
+RE_INTERVAL_END = re.compile(r"版本更新维护?前|维护前|截止|结束|为止|停止")
+
 # 下半池角色：如 "刻律德菈、那刻夏与砂金则将于下半回归跃迁" / "将于版本下半登场"
 # 审查修复：捕获上限 24→60，防长名单截断；BAD_CHAR_WORDS 与后续逐名长度过滤保留防误抓
 RE_HALF_CHAR = re.compile(
@@ -458,7 +470,13 @@ def extract_preview_claims(item: dict[str, Any], cfg: GameConfig, main_start: da
     if m_vn:
         out.append(FieldClaim("next_version", m_vn.group(1), "parse", 1.0, url))
 
-    # next_update_time：斜杠日期 + 版本周期窗口
+    # next_update_time：斜杠日期 + 三重门禁（0.5.3 线上修复 + 用户实测追加）：
+    # ① 时间后紧邻区间右端词（"- 版本更新维护前"/截止/结束/为止）→ 活动区间描述，拒绝
+    # ② 标题为活动类动态（活动说明/签到/补给/通行证等）→ 活动时间不宣布版本，拒绝
+    # ③ 时间前后必须出现版本语义词（版本更新/更新维护/维护更新/版本上线/停机维护）才放行
+    # 活动动态仍可贡献 next_characters（下方独立通道）。
+    t_flat_pv = re.sub(r"\s+", "", title)
+    is_activity_ann = any(k in t_flat_pv for k in ACTIVITY_ANN_WORDS)
     lo = main_start + timedelta(days=cfg.cycle_days - 10)
     hi = main_start + timedelta(days=cfg.cycle_days + 10)
     for mm in re.finditer(r"(\d{4})/(\d{1,2})/(\d{1,2})\s*(\d{1,2}:\d{2})?", content):
@@ -467,6 +485,15 @@ def extract_preview_claims(item: dict[str, Any], cfg: GameConfig, main_start: da
         except ValueError:
             continue
         if lo <= d.date() <= hi:
+            tail = content[mm.end():mm.end() + 20]
+            if RE_INTERVAL_END.search(tail):
+                continue  # ① 区间右端："2026/08/26 04:00 - 版本更新维护前"
+            if is_activity_ann:
+                continue  # ② 预热/配套活动动态：时间不宣布版本
+            # 版本语义上下文：日期前 12 字符 + 后 8 字符内的语义词
+            sem_ctx = content[max(0, mm.start() - 12):mm.end() + 8]
+            if not any(w in sem_ctx for w in VERSION_CTX_WORDS):
+                continue  # ③ 纯活动时间（无版本语义）不映射为版本更新时间
             time_s = mm.group(4) or ""
             out.append(FieldClaim(
                 "next_update_time",

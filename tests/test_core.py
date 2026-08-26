@@ -78,8 +78,9 @@ def ef_cfg():
         "adapter": "hg_ssr", "adapter_params": {}, "cycle_days": 42, "half_days": 21,
         "version_pattern": "「(?P<name>.+?)」版本更新说明",
         "title_include": ["版本更新说明"],
-        "preview_sources": {"title_include": ["研发通讯"]},
-        "known_dates": {"next_name": "雪凇幽梦", "next_update_time": "2026-08-26", "next_characters": "伊冯"},
+        "preview_sources": {"title_include": ["研发通讯", "活动说明"]},
+        # known_dates 已对齐线上止血（2026-09-02 官宣）；8/26 为预热活动时间不得作为版本更新日
+        "known_dates": {"next_name": "雪凇幽梦", "next_update_time": "2026-09-02", "next_characters": "伊冯"},
     })
 
 
@@ -181,14 +182,15 @@ async def main() -> None:
         calls.append(title)
         if "越界" in title:
             return {"next_update_time": "2026-10-20", "next_name": "越界版本"}
-        return {"next_update_time": "2026-08-26", "next_name": "提振版本", "next_characters": ["新角色甲"]}
+        # 8/28：相对 2026-08-26（当前系统日期）为未来，且与推算 8/26 偏差 2 天（≤14）
+        return {"next_update_time": "2026-08-28", "next_name": "提振版本", "next_characters": ["新角色甲"]}
 
     pl.llm_fallback = mock_llm
     u = (await pl.build_updates(cfg_h, [hsr_main(), item("前瞻情报预告", "下版本将于9月3日更新")], 0.8))[0]
     check("R5a LLM 合法注入 conf=0.8/每轮1次",
-          len(calls) == 1 and u.field_value("next_update_time") == "2026-08-26" and u.fields["next_update_time"].confidence == 0.8
+          len(calls) == 1 and u.field_value("next_update_time") == "2026-08-28" and u.fields["next_update_time"].confidence == 0.8
           and u.field_value("next_name") == "提振版本" and "新角色甲" in u.field_value("next_characters"),
-          f"calls={len(calls)}")
+          f"calls={len(calls)} updt={u.field_value('next_update_time')!r}")
     calls.clear()
     u = (await pl.build_updates(cfg_h, [hsr_main(), item("越界前瞻预告", "下版本将于9月30日开启")], 0.8))[0]
     check("R5b 越界时间拒绝（偏差55天）", len(calls) == 1 and u.field_value("next_update_time") == "",
@@ -250,6 +252,69 @@ async def main() -> None:
     check("R9c 折行槽高自适应递增",
           h_short == 168 and h_long == 168 + (len(lines) - 1) * 38,
           f"h_short={h_short} h_long={h_long} lines={len(lines)}")
+
+    # ---------- R10 源语义过滤（0.5.3 线上修复：纯活动时间不得映射为版本更新时间） ----------
+    ef_main_xy = item("「向渊行」版本更新说明", "向渊行版本内容",
+                      extra_claims=[FieldClaim(field="update_time", value="2026-07-16", source="hg_ssr", weight=1.0)],
+                      source="hg_ssr")
+    # R10a：「理智补给」预热活动动态——8/26 与 9/2 均在窗口内但无版本语义 → 拒绝；
+    #       characters 通道（全新干员语境）不受影响
+    hot_item = item("「理智补给」限时活动说明",
+                    "▼//活动时间\n2026/08/26 04:00 - 2026/09/02 04:00（服务器时间）\n"
+                    "▼//活动说明 全新干员6星干员【提弗洛斯】获取概率提升",
+                    source="bili_dynamic")
+    u = (await pl.build_updates(ef_cfg(), [ef_main_xy, hot_item], 0.8))[0]
+    check("R10a 预热活动时间不注入 next_update_time（仅 known 兜底）",
+          u.field_value("next_update_time") == "2026-09-02" and u.fields["next_update_time"].sources == ["known"],
+          f"val={u.field_value('next_update_time')!r} src={u.fields['next_update_time'].sources}")
+    check("R10a 活动动态仍贡献 characters", "提弗洛斯" in u.field_value("next_characters"),
+          f"chars={u.field_value('next_characters')!r}")
+    # R10a-2：用户实测报告的另外两条预热动态（含“版本更新维护前”区间右端描述）同样必须拦截
+    for t_title, t_content in (
+        ("「协议通行证」提速任务开启说明",
+         "「协议通行证」提速任务现已开启 ▼//开放时间 2026/08/26 04:00（服务器时间） - 版本更新维护前"),
+        ("「深林覆雪」限时签到活动说明",
+         "▼//活动时间 2026/08/26 12:00（服务器时间） - 版本更新维护前"),
+    ):
+        u = (await pl.build_updates(ef_cfg(), [ef_main_xy, item(t_title, t_content, source="bili_dynamic")], 0.8))[0]
+        check(f"R10a-2 {t_title[1:7]} 预热时间不注入（维护前后缀陷阱）",
+              u.field_value("next_update_time") == "2026-09-02",
+              f"val={u.field_value('next_update_time')!r}")
+    # R10b：版本语义动态（研发通讯标题 + 更新维护时间）→ 正常注入
+    cfg_ef_no_known = ef_cfg()
+    cfg_ef_no_known.known_dates = {}
+    ver_item = item("「雪凇幽梦」版本研发通讯",
+                    "版本更新维护时间 2026/09/02 04:00（服务器时间）起停机维护",
+                    source="bili_dynamic")
+    u = (await pl.build_updates(cfg_ef_no_known, [ef_main_xy, ver_item], 0.8))[0]
+    check("R10b 版本语义动态注入 next_update_time",
+          u.field_value("next_update_time").startswith("2026-09-02"),
+          f"val={u.field_value('next_update_time')!r}")
+    # R10c：P2-3 前瞻直播时间通道不受影响（"将于…播出"）
+    u = (await pl.build_updates(hsr_cfg(with_known=False),
+                                [hsr_main(), item("4.6版本「新世界之旅」前瞻特别节目将于2026年10月1日19:00直播", "将于2026年10月1日19:00直播")], 0.8))[0]
+    check("R10c 前瞻直播时间通道不受影响", u.field_value("preview_time") == "2026-10-01 19:00",
+          f"preview={u.field_value('preview_time')!r}")
+
+    # ---------- R11 三条真实误源案例（0.5.3 追加：区间右端词 + 活动类标题双拒绝） ----------
+    real_cases = [
+        ("「协议通行证」提速任务开启说明", "2026/08/26 04:00（服务器时间） - 版本更新维护前"),
+        ("「深林覆雪」限时签到活动说明", "2026/08/26 12:00 - 版本更新维护前"),
+        ("「理智补给」限时活动说明", "2026/08/26 04:00 - 2026/09/02 04:00"),
+    ]
+    for i, (t, body) in enumerate(real_cases, 1):
+        u = (await pl.build_updates(ef_cfg(), [ef_main_xy, item(t, "▼//活动时间\n" + body, source="bili_dynamic")], 0.8))[0]
+        v = u.fields.get("next_update_time")
+        check(f"R11 案例{i}「{t[:10]}」误源拒绝（仅 known 兜底）",
+              v is not None and v.sources == ["known"] and v.value == "2026-09-02",
+              f"val={(v.value if v else None)!r} src={(v.sources if v else None)!r}")
+    # R11 对照：版本语义正文仍放行（"更新维护时间为X日"）
+    u = (await pl.build_updates(ef_cfg(), [ef_main_xy, item("「雪凇幽梦」版本研发通讯",
+                                                            "版本更新维护时间为 2026/09/02 04:00（服务器时间）",
+                                                            source="bili_dynamic")], 0.8))[0]
+    check("R11 对照：更新维护时间为X日 正常注入",
+          u.fields["next_update_time"].sources == ["parse"] and u.field_value("next_update_time").startswith("2026-09-02"),
+          f"src={u.fields['next_update_time'].sources} val={u.field_value('next_update_time')!r}")
 
     # 汇总
     print(f"\n===== 离线回归完成: {_PASS} PASS / {_FAIL} FAIL =====")
